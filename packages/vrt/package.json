@@ -1,0 +1,15 @@
+{
+  "name": "vrt",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "vrt": "./bin/vrt.js"
+  },
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT"
+}

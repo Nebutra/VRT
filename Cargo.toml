@@ -1,0 +1,24 @@
+[workspace]
+members = [
+  "crates/vrt-core",
+  "crates/vrt-cli"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/nebutra/vrt"
+
+[workspace.dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.14"
+toml = "0.8"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+walkdir = "2.5"
+vrt-core = { path = "crates/vrt-core" }

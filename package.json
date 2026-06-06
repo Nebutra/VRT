@@ -1,0 +1,11 @@
+{
+  "name": "vrt-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test packages/sdk/test/*.test.js packages/vrt/test/*.test.js"
+  },
+  "workspaces": [
+    "packages/*"
+  ]
+}
