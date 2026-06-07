@@ -1,0 +1,8 @@
+{
+  "tasks": {
+    "typecheck": {},
+    "lint": {},
+    "test": {},
+    "build": {}
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "web",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "build": "next build"
+  },
+  "dependencies": {
+    "next": "16.0.0"
+  }
+}

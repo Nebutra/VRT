@@ -1,0 +1,29 @@
+---
+title: "Examples"
+description: "Fixture projects that show how VRT profiles common JS/TS project shapes."
+---
+
+The `examples/` directory contains lightweight projects for VRT profiling and capability discovery. They are intentionally small: they prove detection, planning, and command generation without requiring dependency installation.
+
+## Matrix
+
+| Example | Shape | What VRT should detect |
+| --- | --- | --- |
+| `examples/next-single-app` | Single Next.js app | Next.js, TypeScript, Vitest, ESLint |
+| `examples/vite-ts-app` | Single Vite TS app | Vite, TypeScript, Vitest, ESLint |
+| `examples/prisma-next-app` | Next.js with Prisma | Next.js, Prisma, schema validation |
+| `examples/next-turbo-pnpm` | pnpm Turborepo | Turborepo affected commands |
+| `examples/nx-workspace` | Nx workspace | Nx affected commands |
+
+## Try an example
+
+```bash
+cargo run -q -p vrt-cli -- --root examples/vite-ts-app doctor --json
+cargo run -q -p vrt-cli -- --root examples/prisma-next-app doctor --json
+cargo run -q -p vrt-cli -- --root examples/next-turbo-pnpm doctor --json
+cargo run -q -p vrt-cli -- --root examples/nx-workspace doctor --json
+```
+
+## Verification
+
+The Rust test suite profiles these examples directly and checks that their capability graph contains the expected command shape. This keeps the examples aligned with the profiler as the runtime evolves.

@@ -16,7 +16,12 @@ export class VrtCommandError extends Error {
 }
 
 export async function verify(options = {}) {
-  const args = ["verify", "--json"];
+  const args = ["verify"];
+  if (options.tokenProfile && options.tokenProfile !== "standard") {
+    args.push("--token-profile", options.tokenProfile);
+  } else {
+    args.push("--json");
+  }
   if (options.mode) {
     args.push("--mode", options.mode);
   }
@@ -25,6 +30,20 @@ export async function verify(options = {}) {
   }
   if (options.continue) {
     args.push("--continue");
+  }
+  if (options.tokenProfile === "rtk") {
+    return runText(args, options);
+  }
+  return runJson(args, options);
+}
+
+export async function plan(options = {}) {
+  const args = ["verify", "--dry-run", "--json"];
+  if (options.mode) {
+    args.push("--mode", options.mode);
+  }
+  if (options.full) {
+    args.push("--full");
   }
   return runJson(args, options);
 }
@@ -39,6 +58,29 @@ export async function explain(options = {}) {
 
 export async function bench(options = {}) {
   return runJson(["bench", "--json"], options);
+}
+
+export async function tokenDoctor(options = {}) {
+  return runJson(["token", "doctor", "--json"], options);
+}
+
+export async function tokenManifest(options = {}) {
+  return runJson(["token", "manifest", "--json"], options);
+}
+
+export async function tokenInstallRules(options = {}) {
+  return runText(["token", "install-rules"], options);
+}
+
+export async function runText(args, options = {}) {
+  const root = path.resolve(options.root ?? process.cwd());
+  const bin = await resolveVrtBinary(options.bin);
+  const commandArgs = ["--root", root, ...args];
+  const result = await runCommand(bin, commandArgs, {
+    cwd: root,
+    env: options.env,
+  });
+  return result.stdout;
 }
 
 export async function runJson(args, options = {}) {

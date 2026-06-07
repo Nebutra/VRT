@@ -1,0 +1,66 @@
+---
+title: "Configuration"
+description: "VRT policy configuration for default verification behavior without rule piles."
+---
+
+VRT is zero-config first. `vrt init` creates `.vrt/config.toml` with a conservative policy template, and future `vrt init` or `vrt verify` runs preserve that file instead of overwriting user policy.
+
+## Default mode
+
+Use `[policy].default_mode` to choose the verification mode used when `vrt verify`, MCP, or the JSONL broker are called without an explicit mode.
+
+```toml
+schema_version = 1
+
+[policy]
+default_mode = "merge"
+```
+
+Supported values are:
+
+- `dev`
+- `merge`
+- `release`
+
+An explicit mode always wins:
+
+```bash
+vrt verify --mode dev
+```
+
+## Policy shape
+
+The generated config keeps governance intent separate from project command wiring:
+
+```toml
+schema_version = 1
+
+[policy]
+default_mode = "dev"
+
+[policy.strict]
+areas = ["auth", "billing", "database", "env", "infra"]
+
+[policy.relaxed]
+areas = ["docs", "marketing"]
+
+[release]
+require_full_build = true
+require_ci = true
+```
+
+VRT still discovers commands from the project. Do not duplicate script lists in config unless a future VRT version adds a first-class policy field for that behavior.
+
+## Current behavior
+
+Implemented today:
+
+- `policy.default_mode` controls the mode for omitted-mode CLI, MCP, and broker verification calls.
+- `policy.strict.areas` escalates matching change risk tags into stricter dev plans. For example, adding `docs` makes documentation-only changes run the broader high-risk path instead of staying in the smallest local loop.
+- `policy.relaxed.areas` suppresses strict-policy escalation for matching low-risk areas such as `docs`, `marketing`, and `style`. It does not override hard risks such as auth, billing, database, migrations, env, infra, CI, package boundaries, or build config.
+- `release.require_full_build` controls whether release-mode plans must include production build proof. Setting it to `false` skips the build only as disclosed residual risk; it does not raise release confidence.
+- `release.require_ci` records external CI as a release requirement. Local VRT runs expose this as a CI escalation and residual risk instead of pretending hosted CI passed.
+- Explicit CLI/API modes override config.
+- Existing `.vrt/config.toml` is preserved by `vrt init` and `vrt verify`.
+
+Relaxed fields document low-risk intent, but VRT does not let them overclaim release readiness. Release confidence remains tied to collected evidence and external CI/deployment proof.

@@ -1,0 +1,165 @@
+---
+title: "CLI"
+description: "The native command surface for profiling, planning, verification, evidence, and reports."
+---
+
+The CLI is the authoritative execution entrypoint.
+
+```bash
+vrt init
+vrt doctor
+vrt verify
+vrt verify --json
+vrt verify --dry-run
+vrt verify --dry-run --json
+vrt verify --mode merge
+vrt verify --mode release
+vrt verify --full
+vrt verify --continue
+vrt verify --token-profile rtk
+vrt verify --token-profile headroom
+vrt explain
+vrt explain --json
+vrt skill install
+vrt bench
+vrt session start --worktree ../my-repo-agent-a
+vrt session status --json
+vrt session list --json
+vrt session view --json
+vrt report --format markdown --output .vrt/reports/vrt.md
+vrt report --format sarif --output .vrt/reports/vrt.sarif
+vrt report --format junit --output .vrt/reports/vrt.junit.xml
+vrt report --format otel --output .vrt/reports/vrt.otel.json
+vrt token doctor
+vrt token manifest --json
+vrt token install-rules
+vrt false-confidence record --stricter-check "vrt verify --mode release --full" --failure-summary "build failed on an issue dev verification should have covered"
+vrt false-confidence list
+vrt mcp serve
+vrt broker status --json
+vrt broker serve
+```
+
+## Verification modes
+
+- `dev`: local development loop. Allows skipped expensive checks with residual risk.
+- `merge`: stricter pre-merge confidence target.
+- `release`: release-oriented local precheck. It does not replace CI.
+
+When `--mode` is omitted, VRT reads `.vrt/config.toml` and uses `[policy].default_mode`. If the config is absent, it falls back to `dev`. See [Configuration](/docs/configuration).
+
+## Graceful degradation
+
+`vrt init` and `vrt doctor --json` do not require a `package.json`. Unknown or non-JS roots produce an `unknown` workspace profile, no verification capabilities, and weak spots such as `no-package-json`, `no-typecheck-script`, `no-test-script`, `no-build-script`, `destructive-script`, `no-env-validation`, and `no-ci-config`. Each weak spot includes both a message about what cannot be locally verified and a suggestion for improving the project's verification capability. This lets agents report limits instead of treating an unsupported project as a successful verification.
+
+Capability graph entries include `safety_level` values: `safe`, `project`, `expensive`, `destructive`, `networked`, or `unknown`. Agents should prefer lower-risk checks first and treat `destructive` as a refusal path, not an automation permission.
+
+When `.github/workflows/*.yml` or `.github/workflows/*.yaml` exists, the profile includes a `ci` array with the workflow provider, path, name, job ids, discovered `run` commands, and hints for whether the workflow appears to run typecheck, test, build, e2e, or a matrix. CI detection helps agents understand the project boundary, but CI remains external evidence rather than a local pass signal.
+
+For release-facing governance, VRT also reports weak spots when no environment validation script is detected. If a script such as `env:check`, `check:env`, or `validate-env` exists, VRT exposes it as `env_validate` and selects it for env-risk changes and release-mode plans. Prisma projects additionally report `no-migration-safety-check` unless the project exposes an explicit migration safety script such as `migration:check`, `check:migrations`, or a `prisma migrate diff/status` command. When present, that script becomes `migration_safety` and is selected for database schema, migration, and release-mode plans. If the project exposes `prisma:generate`, `generate:prisma`, or another `prisma generate` script, VRT exposes it as `schema_generate` and selects it after schema validation for schema/migration changes.
+
+If a project exposes `test:related`, `test:changed`, `test:affected`, `related:test`, `changed:test`, or `affected:test`, VRT selects that script for dev-mode executable changes and reports the full `test` script as skipped residual risk.
+
+## Agent JSON
+
+`vrt verify --dry-run --json` returns the planned verification steps, skipped checks, escalation guidance, and expected confidence without running project commands or writing evidence. Each plan step carries its `safety_level`, so agents can inspect command risk without reloading the capability graph. Use dry-run when an agent needs to inspect the plan before deciding whether to run verification.
+
+VRT refuses destructive verification commands such as `rm -rf`, `git reset --hard`, `prisma migrate deploy`, `db push`, and `docker compose down -v`. Refusals are recorded as failed checks with raw logs so agents cannot silently execute destructive project scripts through VRT.
+
+`vrt verify --json` returns an agent report wrapper. It includes direct action fields plus the full evidence record:
+
+- `status`
+- `evidence_id`
+- `checks_run`, `checks_reused`, and `checks_skipped`
+- `failure_kind`
+- `root_cause_candidates`
+- `downstream_noise_hidden`
+- `recommended_next_action`
+- `do_not_run`
+- `raw_log`
+- `confidence`
+- `residual_risks`
+- `evidence`
+
+On failure, the command exits non-zero after flushing the JSON report to stdout so agents can parse the result from command failures. Package-manager wrapper noise is sorted behind structured TypeScript and test diagnostics.
+
+## Continue after failure
+
+`vrt verify --continue` links new evidence to `.vrt/latest.json`. It reuses prior passed checks only when the previous evidence is partial and the base commit, profile hash, and diff hash still match. If the diff changed after a patch, VRT does not reuse old checks and records stale reasons instead.
+
+## Evidence cache
+
+Repeated `vrt verify` requests can reuse a valid exact-match evidence cache entry. A cache hit requires the same plan id, base commit, diff hash, profile hash, lockfile hash, selected steps, and skipped checks. VRT still writes a fresh evidence record for the current session, with `continued_from` pointing to the source evidence and reused checks listed under `reused_checks`.
+
+## Bench
+
+`vrt bench --json` reads the evidence ledger and reports conservative time-savings and quality metrics:
+
+- `full_builds_avoided`
+- `cache_hits` and `cache_hit_rate`
+- `evidence_reuse_rate`
+- `reused_checks` and `reruns_avoided`
+- `early_failures`
+- `ci_failures_shifted_left`
+- `stale_evidence_detected`
+- `log_lines_compressed`
+- `agent_tokens_saved_estimate`
+- `estimated_saved_time_ms`
+- `saved_by.skipped_expensive_checks_ms`
+- `saved_by.evidence_reuse_ms`
+- `false_confidence_cases` and `false_confidence_rate`
+
+The saved-time, CI shift-left, and token-saving fields are conservative estimates from skipped expensive checks, local failures found before broader checks, exact evidence reuse, and raw log line counts. They do not turn skipped checks into passed checks.
+
+## Failure explanation
+
+`vrt explain --json` reads the latest failed evidence and returns the same failure-kind, root-cause, downstream-noise, raw-log, and do-not-run guidance without rerunning verification.
+
+The parser keeps package-manager wrapper noise behind structured diagnostics. It currently normalizes TypeScript diagnostics plus Vitest and Jest failure headers, assertion summaries, and source locations when they are present in the raw log.
+
+## Skill installer
+
+`vrt skill install` writes VRT agent rules to common local surfaces:
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `GEMINI.md`
+- `.cursor/rules/vrt.md`
+- `.windsurf/rules/vrt.md`
+- `.codex/skills/vrt/SKILL.md`
+- `.vrt/skill/vrt.md`
+
+The installer is idempotent for top-level agent documents and keeps skipped-check and failure-explanation rules directly visible to agents.
+
+## Timeouts
+
+Verification plan steps include timeout metadata. The runner enforces those timeouts and records timed-out commands as failed evidence with `exit_code: null`, a raw log line such as `[vrt] timed out after 5000ms`, and partial confidence.
+
+## False-confidence ledger
+
+If a stricter verification later fails for a reason an earlier confidence level should have covered, record it:
+
+```bash
+vrt false-confidence record \
+  --evidence-id ev_123 \
+  --stricter-check "vrt verify --mode release --full" \
+  --failure-summary "next build failed on a bundler issue that local confidence missed"
+```
+
+Omit `--evidence-id` to attach the case to `.vrt/latest.json`.
+
+`vrt false-confidence list --json` returns the recorded cases. `vrt bench --json` includes `false_confidence_cases` and `false_confidence_rate` so teams can track whether VRT is over-claiming confidence.
+
+## Worktree sessions
+
+`vrt session start --worktree <path>` creates an optional git worktree session for parallel Agent work. It records session metadata in the original repository and in the new worktree so future evidence can be tied to a stable `session_id`.
+
+Use `vrt session status --json` to inspect the current root, `vrt session list --json` in the original repository to see recorded sessions, and `vrt session view --json` to aggregate session metadata with each worktree's latest evidence, active lock, and false-confidence count.
+
+## Broker
+
+`vrt broker serve` starts a local JSONL stdio broker for agents that need bounded VRT operations without the full MCP JSON-RPC envelope.
+
+Supported operations are `status`, `analyze_change`, `plan_verification`, `run_verification`, `explain_failure`, `get_evidence`, `escalate_verification`, `session_view`, and `shutdown`.
+
+`vrt broker status --json` reports the active run lock, latest evidence summary, session view, allowed tools, and forbidden capabilities. The broker deliberately does not expose `run_any_shell_command`; verification execution still goes through VRT plans and project-owned capabilities.

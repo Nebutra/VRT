@@ -1,0 +1,70 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "VRT",
+  "theme": "mint",
+  "colors": {
+    "primary": "#1D4ED8",
+    "light": "#1D4ED8",
+    "dark": "#BFD7FF"
+  },
+  "logo": {
+    "light": "/assets/brand/vrt-wordmark.png",
+    "dark": "/assets/brand/vrt-wordmark-dark.png"
+  },
+  "favicon": "/assets/favicon.png",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get started",
+        "pages": [
+          "docs/introduction",
+          "docs/quickstart",
+          "docs/examples"
+        ]
+      },
+      {
+        "group": "Core runtime",
+        "pages": [
+          "docs/cli",
+          "docs/configuration",
+          "docs/monorepos",
+          "docs/sessions",
+          "docs/evidence",
+          "docs/reports"
+        ]
+      },
+      {
+        "group": "Agent integrations",
+        "pages": [
+          "docs/mcp",
+          "docs/broker",
+          "docs/sdk",
+          "docs/github-action",
+          "docs/token-saving"
+        ]
+      },
+      {
+        "group": "Project",
+        "pages": [
+          "docs/architecture",
+          "docs/growth",
+          "docs/brand",
+          "docs/contributing"
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/nebutra/vrt"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/nebutra/vrt"
+    }
+  }
+}

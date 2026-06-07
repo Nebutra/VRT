@@ -4,7 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { VrtCommandError, doctor, explain, verify } from "../src/index.js";
+import {
+  VrtCommandError,
+  doctor,
+  explain,
+  plan,
+  tokenDoctor,
+  tokenInstallRules,
+  tokenManifest,
+  verify,
+} from "../src/index.js";
 
 async function fakeVrt(scriptBody) {
   const dir = await mkdtemp(path.join(tmpdir(), "vrt-sdk-"));
@@ -41,6 +50,74 @@ console.log(JSON.stringify({ argv: process.argv.slice(2) }));
     "merge",
     "--full",
     "--continue",
+  ]);
+});
+
+test("verify passes token profile without forcing json output", async () => {
+  const { dir, bin } = await fakeVrt(`#!/usr/bin/env node
+console.log(JSON.stringify({ argv: process.argv.slice(2) }));
+`);
+
+  const result = await verify({ root: dir, bin, tokenProfile: "headroom" });
+
+  assert.deepEqual(result.argv, [
+    "--root",
+    dir,
+    "verify",
+    "--token-profile",
+    "headroom",
+  ]);
+});
+
+test("plan calls vrt verify --dry-run --json without executing verification", async () => {
+  const { dir, bin } = await fakeVrt(`#!/usr/bin/env node
+console.log(JSON.stringify({ argv: process.argv.slice(2) }));
+`);
+
+  const result = await plan({ root: dir, bin, mode: "release", full: true });
+
+  assert.deepEqual(result.argv, [
+    "--root",
+    dir,
+    "verify",
+    "--dry-run",
+    "--json",
+    "--mode",
+    "release",
+    "--full",
+  ]);
+});
+
+test("token doctor and install-rules call token subcommands", async () => {
+  const { dir, bin } = await fakeVrt(`#!/usr/bin/env node
+if (process.argv.includes("--json")) {
+  console.log(JSON.stringify({ argv: process.argv.slice(2) }));
+} else {
+  console.log("installed " + process.argv.slice(2).join(" "));
+}
+`);
+
+  assert.deepEqual((await tokenDoctor({ root: dir, bin })).argv, [
+    "--root",
+    dir,
+    "token",
+    "doctor",
+    "--json",
+  ]);
+  assert.match(await tokenInstallRules({ root: dir, bin }), /installed --root .* token install-rules/);
+});
+
+test("tokenManifest calls token manifest JSON subcommand", async () => {
+  const { dir, bin } = await fakeVrt(`#!/usr/bin/env node
+console.log(JSON.stringify({ argv: process.argv.slice(2) }));
+`);
+
+  assert.deepEqual((await tokenManifest({ root: dir, bin })).argv, [
+    "--root",
+    dir,
+    "token",
+    "manifest",
+    "--json",
   ]);
 });
 

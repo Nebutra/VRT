@@ -1,0 +1,58 @@
+---
+title: "Sessions"
+description: "Create optional git worktree sessions for parallel Agent work."
+---
+
+VRT does not require worktrees, but it can create an isolated git worktree session when multiple agents need to work in parallel.
+
+```bash
+vrt session start --worktree ../my-repo-agent-a
+vrt session status --json
+vrt session list --json
+vrt session view --json
+```
+
+`vrt session start` runs `git worktree add`, creates a branch, and writes session metadata to both roots:
+
+- `<repo>/.vrt/sessions/<session-id>.json`
+- `<repo>/.vrt/session.json`
+- `<worktree>/.vrt/session.json`
+- `<worktree>/.vrt/sessions/<session-id>.json`
+
+The metadata includes:
+
+- schema version
+- session id
+- created time
+- original root
+- worktree path
+- branch
+- base commit
+- status
+- next-step instructions
+
+After creating a session, move into the worktree and export the session id:
+
+```bash
+cd ../my-repo-agent-a
+export VRT_SESSION_ID=session_...
+vrt verify --json
+```
+
+Evidence created in that worktree still records `session_id`, `diff_hash`, `profile_hash`, dirty worktree state, changed file paths, raw logs, skipped checks, and confidence. The normal `.vrt/run.lock` remains worktree-scoped, so one agent cannot overwrite another agent's local evidence ledger unless they share the same worktree.
+
+Use `vrt session status` inside any directory to see whether the current root is managed by VRT session metadata. If no metadata exists, VRT reports an unmanaged session and shows the current git branch when available.
+
+## Multi-Agent view
+
+Use `vrt session view --json` in the original repository to inspect all recorded worktree sessions at once.
+
+The view includes:
+
+- session metadata
+- latest evidence summary from each worktree when available
+- active `.vrt/run.lock` details when a verification is running
+- false-confidence case count per worktree
+- check counts, failed-check counts, skipped-check counts, and confidence
+
+This is intentionally read-only. It gives agents and humans a session control plane without introducing a daemon.

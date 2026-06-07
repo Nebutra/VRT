@@ -1,0 +1,88 @@
+---
+title: "RTK and Headroom"
+description: "Compatibility profiles for mainstream agent token-saving tools."
+---
+
+VRT supports RTK and Headroom through explicit output profiles.
+
+```bash
+rtk init -g --codex
+vrt verify --token-profile rtk
+rtk vrt verify --token-profile rtk
+headroom wrap codex
+headroom proxy --port 8787
+headroom mcp install
+vrt verify --token-profile headroom
+vrt token doctor
+vrt token manifest --json
+vrt token install-rules
+```
+
+## Compatibility manifest
+
+`vrt token manifest --json` emits the machine-readable contract shared by RTK, Headroom, MCP, broker, and SDK integrations. It declares:
+
+- RTK as a `cli-proxy` profile for shell output rewriting.
+- Headroom as a `structured-context` profile for compressed-but-retrievable evidence.
+- RTK agent setup commands such as `rtk init -g --codex`.
+- Headroom agent setup commands such as `headroom wrap codex`, `headroom proxy --port 8787`, and `headroom mcp install`.
+- Commands agents should prefer for each profile.
+- Headroom MCP retrieval tools such as `headroom_retrieve`.
+- Evidence references that must not be removed during compression.
+- Retrieval paths such as `.vrt/latest.json`, `.vrt/evidence/**`, `vrt://latest-evidence`, and `vrt://token-compatibility`.
+
+Agents can also read the same manifest through MCP:
+
+```json
+{ "method": "resources/read", "params": { "uri": "vrt://token-compatibility" } }
+```
+
+## RTK profile
+
+`vrt verify --token-profile rtk` emits compact line-oriented output for CLI proxy filters. It preserves:
+
+- `evidence=`
+- `report=`
+- `raw=`
+- `.vrt/evidence`
+
+RTK may compact stdout, but VRT evidence remains recoverable through `.vrt/latest.json` and `.vrt/evidence/**`.
+
+For Codex hook installation, use:
+
+```bash
+rtk init -g --codex
+```
+
+## Headroom profile
+
+`vrt verify --token-profile headroom` emits structured JSON designed for compression and later retrieval. It preserves:
+
+- `refs.evidence`
+- `refs.raw_log_dir`
+- `checks[].raw_log`
+- `confidence`
+
+Headroom may compress summaries, but original logs remain available at `raw_log` paths. For Codex, proxy, and MCP use:
+
+```bash
+headroom wrap codex
+headroom proxy --port 8787
+headroom mcp install
+```
+
+If compressed context is insufficient, retrieve the original context through Headroom CCR (`headroom_retrieve`) or the VRT raw log paths in `.vrt/evidence/**`.
+
+## Install rules
+
+`vrt token install-rules` writes the shared RTK/Headroom rules to common agent surfaces:
+
+- `.vrt/token-saving/RTK_HEADROOM.md`
+- `.cursor/rules/vrt-token-saving.md`
+- `.windsurf/rules/vrt-token-saving.md`
+- `.codex/skills/vrt-token-saving/SKILL.md`
+- links in `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`
+
+## Agent rule
+
+Do not compress away evidence references. Skipped checks are residual risk, not passed checks. If more detail is needed, retrieve the raw log path rather than rerunning expensive commands.

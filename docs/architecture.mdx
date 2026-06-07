@@ -1,0 +1,115 @@
+---
+title: "Architecture"
+description: "How VRT turns project understanding into verification plans and evidence."
+---
+
+VRT v0 implements the local Rust-native runtime path:
+
+1. Project profiler
+2. Capability graph
+3. Git diff interpreter
+4. Verification planner
+5. Runner
+6. Evidence ledger
+7. Human report
+8. Agent JSON
+9. Skill installer
+10. MCP stdio server with Resources, Prompts, and Tools
+11. TypeScript SDK
+12. npm CLI wrapper
+13. `verify --continue` evidence stitching
+14. SARIF, JUnit, and OpenTelemetry JSON report export
+15. RTK and Headroom token-saving profiles
+16. Worktree run lock for local multi-Agent safety
+17. Optional git worktree session metadata
+18. Multi-Agent session view
+19. Same-plan singleflight deduplication
+20. Local JSONL broker for bounded agent operations
+21. Exact-match evidence cache for repeated local verification
+
+The implementation is conservative. It shells out to project-owned commands and records what happened. It does not introduce a new typechecker, test runner, build system, or CI replacement.
+
+Before executing a planned step, the runner classifies command text for destructive patterns such as `rm -rf`, `git reset --hard`, `prisma migrate deploy`, `db push`, and volume-destructive Docker shutdowns. VRT refuses those commands, records a failed check with a raw log, and leaves explicit user execution outside VRT as the escalation path.
+
+Profiling also scans `package.json` scripts for the same destructive patterns and reports a `destructive-script` weak spot in `vrt doctor --json`. This gives agents an early warning before any verification plan reaches the runner.
+
+## Agent context model
+
+The MCP server and JSONL broker separate agent context from agent actions:
+
+- Resources expose project profile, latest evidence, skill rules, and RTK/Headroom token-saving rules.
+- Prompts expose guided verification, failure explanation, and reporting workflows.
+- Tools execute bounded VRT operations only; arbitrary shell execution is intentionally absent.
+- The broker exposes the same bounded operation set over line-oriented JSON for lightweight local agent runtimes.
+
+## Confidence model
+
+Skipped checks are residual risk. Local confidence, merge readiness, and release readiness are reported separately.
+
+## Session safety
+
+Every verification plan has a `session_id`, and every run acquires `.vrt/run.lock` before executing project commands. The lock is intentionally worktree-scoped: it prevents two local Agent sessions from racing over CPU-heavy commands, raw logs, and `.vrt/latest.json`.
+
+VRT does not require a daemon in v0. The lock is a simple local coordination primitive that keeps the evidence ledger from being overwritten by competing verification sessions.
+
+`vrt session start --worktree <path>` can create a git worktree for a parallel Agent session and writes `.vrt/session.json` plus `.vrt/sessions/<session-id>.json` metadata in both roots. The agent can then export `VRT_SESSION_ID` inside that worktree so evidence is tied to a stable session.
+
+`vrt session view --json` aggregates recorded sessions with each worktree's latest evidence summary, active run lock, dirty state, confidence, skipped checks, and false-confidence count.
+
+When another process is already verifying the same `plan_id`, VRT waits for matching latest evidence and returns it instead of launching duplicate commands. The match requires the same plan id, base commit, diff hash, and profile hash. Different plans still fail while the run lock is active.
+
+When no run is active and a valid prior evidence record exactly matches the current plan, diff, profile, lockfile, config, toolchain, relevant inputs, env assumptions, selected steps, and skipped checks, VRT writes a new cache-hit evidence record with `continued_from` and `reused_checks` instead of rerunning commands. Partial, failed, stale, or mismatched evidence cannot be a cache source.
+
+## Project adapters
+
+VRT detects pnpm, npm, yarn, bun, Next.js, Vite, Turborepo, Nx, TypeScript, Vitest, Jest, Playwright, Prisma, Drizzle, ESLint, Biome, and GitHub Actions workflows from existing project files. Drizzle is detected from `drizzle-kit` metadata or `drizzle.config.*` files.
+
+Every capability includes a `safety_level` field classified as `safe`, `project`, `expensive`, `destructive`, `networked`, or `unknown`. Planned steps copy that level into `vrt verify --dry-run --json`, so agents can choose cheaper and safer proof paths before they run anything. The runner still enforces destructive refusal at execution time.
+
+Detected CI workflows are serialized into the project profile with provider, workflow path, workflow name, job ids, discovered `run` commands, and hints for `runs_typecheck`, `runs_test`, `runs_build`, `runs_e2e`, and `has_matrix`. This is profile evidence only; VRT still treats CI as external proof and will not claim release readiness from local checks alone.
+
+When a project exposes a check-style format script such as `check:format`, `format:check`, `biome check`, `biome ci`, or `--check`, VRT adds a `format_check` capability. Merge/release and high-risk plans can run it as static hygiene proof; dev loops may skip it with residual risk.
+
+When a project exposes a related-test script such as `test:related`, `test:changed`, `test:affected`, `related:test`, `changed:test`, or `affected:test`, VRT prefers it for dev-mode executable changes and keeps the full `test` script as `full_test` residual risk. VRT does not invent related-test commands; it only reuses scripts the project already owns.
+
+When a project exposes an environment validation script such as `env:check`, `check:env`, `validate-env`, `dotenvx`, `@t3-oss/env`, `t3-env`, or `zod-env`, VRT adds an `env_validate` capability. Env-risk changes and release-mode plans run it as local environment-contract proof, while hosted secret presence remains external release evidence.
+
+When a Prisma project exposes a generation script such as `prisma:generate`, `generate:prisma`, or any script containing `prisma generate`, VRT adds a `schema_generate` capability. Database schema and migration plans run it after schema validation so generated client freshness is verified when the project already owns that command.
+
+When a project exposes a migration safety script such as `migration:check`, `migrations:check`, `check:migration`, `check:migrations`, or a `prisma migrate diff/status` command, VRT adds a `migration_safety` capability. Database schema, migration, and release-mode plans run it as local migration-contract proof, while live database state and reversibility remain external release evidence.
+
+When Playwright is detected and the project exposes a `smoke`, `test:smoke`, `e2e`, `test:e2e`, `playwright`, or `test:playwright` script, VRT adds a `browser_smoke` capability. Dev-mode UI loops may skip it with residual risk, while merge/release or high-risk plans select it before claiming broader confidence.
+
+Weak spots are part of the profile, not failures. Each weak spot contains a stable id, a message about what cannot be locally verified, and a concrete suggestion for improving verification capability. VRT reports missing environment validation as `no-env-validation`. Prisma projects also report `no-migration-safety-check` unless a migration safety script or `prisma migrate diff/status` command is present. These keep release confidence honest without forcing users into a VRT-specific rule file.
+
+If a root has no `package.json`, VRT degrades to an `unknown` profile with no capabilities and explicit weak spots instead of failing during profiling. Unsupported projects should produce auditable limits, not fake confidence.
+
+When Turborepo or Nx is detected, VRT delegates affected task selection to the project's own graph engine. See [Monorepos](/docs/monorepos).
+
+For workspace profile context, VRT also creates lightweight nodes from `apps/*` and `packages/*`, then enriches them from nested `package.json` files when present. If `apps/web/components/pricing-card.tsx` changes, `apps-web` appears in `affected_nodes`. If `packages/ui/src/index.ts` changes and `apps/web` depends on the package name from `packages/ui/package.json`, both nodes appear in `affected_nodes`; the execution command still comes from the selected capability.
+
+## Change risk tags
+
+The change interpreter emits snake-case risk tags for agent JSON:
+
+- `ui_component` for TSX or component paths
+- `api_route` for route/API files
+- `shared_package` for files under `packages/`
+- `package_boundary` for package manifests, lockfiles, tsconfig files, and package entrypoints
+- `build_config` for Next.js, Vite, Turborepo, and Nx configuration changes
+- `database_schema` and `migration` for Prisma schema, Drizzle config, and migration changes
+- `auth`, `billing`, `env`, `infra`, and `ci` for high-risk operational surfaces
+
+Boundary and high-risk tags trigger broader plans and escalation guidance. For example, a local component change can skip build with residual risk, while a `next.config.ts` or package entrypoint change keeps build in the plan.
+
+## Roadmap boundary
+
+The current implementation covers the local v0/v0.1 runtime: CLI, Skill, MCP, JSONL broker, evidence, reports, adapters, token-saving profiles, SDK, npm wrapper, GitHub Action package, worktree-level run locks, same-plan singleflight deduplication, exact-match local evidence cache, optional worktree session metadata, multi-Agent session view, false-confidence recording, and OpenTelemetry JSON trace export.
+
+Future roadmap items remain intentionally separate:
+
+- long-running daemon lifecycle manager
+- full IDE extension
+- hosted team evidence ledger and remote cache
+
+Those future pieces should not be implied by a successful local `vrt verify` run. VRT reports confidence for the evidence it actually collected.

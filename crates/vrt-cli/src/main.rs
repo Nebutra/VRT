@@ -1,12 +1,17 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use vrt_core::{
-    analyze_change, bench_summary, build_capability_graph, explain_latest, export_report,
-    handle_mcp_message, human_report, initialize_project, install_skill, plan_verification,
-    profile_project, run_verification, run_verification_continue, ReportFormat, VerificationMode,
+    analyze_change, bench_summary, broker_status, build_capability_graph, current_worktree_session,
+    explain_latest, export_report, handle_broker_message, handle_mcp_message, human_report,
+    initialize_project, install_skill, install_token_rules, list_false_confidence_cases,
+    list_worktree_sessions, multi_agent_session_view, plan_verification, profile_project,
+    record_false_confidence_case, render_agent_report, render_token_report,
+    resolve_verification_mode, run_verification, run_verification_continue, start_worktree_session,
+    token_compatibility_manifest, ReportFormat, TokenProfile, VerificationMode,
 };
 
 #[derive(Debug, Parser)]
@@ -33,14 +38,18 @@ enum Command {
         json: bool,
     },
     Verify {
-        #[arg(long, value_enum, default_value_t = CliMode::Dev)]
-        mode: CliMode,
+        #[arg(long, value_enum)]
+        mode: Option<CliMode>,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        dry_run: bool,
         #[arg(long)]
         full: bool,
         #[arg(long = "continue")]
         continue_after_failure: bool,
+        #[arg(long, value_enum, default_value_t = CliTokenProfile::Standard)]
+        token_profile: CliTokenProfile,
     },
     Explain {
         #[arg(long)]
@@ -54,6 +63,10 @@ enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    Broker {
+        #[command(subcommand)]
+        command: BrokerCommand,
+    },
     Bench {
         #[arg(long)]
         json: bool,
@@ -63,6 +76,18 @@ enum Command {
         format: CliReportFormat,
         #[arg(long)]
         output: PathBuf,
+    },
+    Token {
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+    FalseConfidence {
+        #[command(subcommand)]
+        command: FalseConfidenceCommand,
+    },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
     },
 }
 
@@ -76,6 +101,70 @@ enum McpCommand {
     Serve,
 }
 
+#[derive(Debug, Subcommand)]
+enum BrokerCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Serve,
+}
+
+#[derive(Debug, Subcommand)]
+enum TokenCommand {
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    Manifest {
+        #[arg(long)]
+        json: bool,
+    },
+    InstallRules,
+}
+
+#[derive(Debug, Subcommand)]
+enum FalseConfidenceCommand {
+    Record {
+        #[arg(long)]
+        evidence_id: Option<String>,
+        #[arg(long)]
+        stricter_check: String,
+        #[arg(long)]
+        failure_summary: String,
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    Start {
+        #[arg(long)]
+        worktree: PathBuf,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    View {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliMode {
     Dev,
@@ -85,8 +174,17 @@ enum CliMode {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliReportFormat {
+    Markdown,
     Sarif,
     Junit,
+    Otel,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliTokenProfile {
+    Standard,
+    Rtk,
+    Headroom,
 }
 
 fn main() -> Result<()> {
@@ -113,6 +211,13 @@ fn main() -> Result<()> {
                 {
                     println!("- {item:?}");
                 }
+                if profile.ci.is_empty() {
+                    println!("- CI workflows: none detected");
+                } else {
+                    for workflow in profile.ci {
+                        println!("- CI workflow: {} ({})", workflow.name, workflow.path);
+                    }
+                }
             }
         }
         Command::Doctor { json } => {
@@ -129,6 +234,14 @@ fn main() -> Result<()> {
                 for cap in graph.capabilities {
                     println!("- {}: {}", cap.id, cap.command);
                 }
+                println!("\nCI workflows:");
+                if profile.ci.is_empty() {
+                    println!("- none detected");
+                } else {
+                    for workflow in &profile.ci {
+                        println!("- {}: {}", workflow.name, workflow.path);
+                    }
+                }
                 println!("\nWeak spots:");
                 if profile.weak_spots.is_empty() {
                     println!("- none detected");
@@ -142,15 +255,26 @@ fn main() -> Result<()> {
         Command::Verify {
             mode,
             json,
+            dry_run,
             full,
             continue_after_failure,
+            token_profile,
         } => {
             let profile = initialize_project(&root)?;
             let graph = build_capability_graph(&root, &profile)?;
             let change = analyze_change(&root, &profile)?;
-            let mut plan = plan_verification(&profile, &graph, &change, mode.into())?;
+            let mode = resolve_verification_mode(&root, mode.map(Into::into))?;
+            let mut plan = plan_verification(&profile, &graph, &change, mode)?;
             if full {
                 add_full_build_if_available(&graph, &mut plan);
+            }
+            if dry_run {
+                if json {
+                    print_json(&plan)?;
+                } else {
+                    print!("{}", human_plan(&plan));
+                }
+                return Ok(());
             }
             let evidence = if continue_after_failure {
                 run_verification_continue(&root, &profile, &change, &plan)?
@@ -158,11 +282,14 @@ fn main() -> Result<()> {
                 run_verification(&root, &profile, &change, &plan)?
             };
             if json {
-                print_json(&evidence)?;
+                print_json(&render_agent_report(&root, &evidence))?;
+            } else if !matches!(token_profile, CliTokenProfile::Standard) {
+                print!("{}", render_token_report(&evidence, token_profile.into()));
             } else {
                 print!("{}", human_report(&evidence));
             }
             if evidence.checks.iter().any(|check| check.status == "failed") {
+                io::stdout().flush()?;
                 std::process::exit(1);
             }
         }
@@ -201,6 +328,38 @@ fn main() -> Result<()> {
                 serve_mcp(&root)?;
             }
         },
+        Command::Broker { command } => match command {
+            BrokerCommand::Status { json } => {
+                let status = broker_status(&root);
+                if json {
+                    print_json(&status)?;
+                } else {
+                    println!("VRT broker:");
+                    println!(
+                        "- protocol: {}",
+                        status["protocol"].as_str().unwrap_or("unknown")
+                    );
+                    println!("- root: {}", status["root"]);
+                    println!(
+                        "- active lock: {}",
+                        if status["active_lock"].is_null() {
+                            "none"
+                        } else {
+                            "present"
+                        }
+                    );
+                    println!(
+                        "- latest evidence: {}",
+                        status["latest_evidence"]["evidence_id"]
+                            .as_str()
+                            .unwrap_or("none")
+                    );
+                }
+            }
+            BrokerCommand::Serve => {
+                serve_broker(&root)?;
+            }
+        },
         Command::Bench { json } => {
             let summary = bench_summary(&root)?;
             if json {
@@ -214,8 +373,216 @@ fn main() -> Result<()> {
             export_report(&root, format.into(), &output)?;
             println!("Wrote {} report to {}", format.label(), output.display());
         }
+        Command::Token { command } => match command {
+            TokenCommand::Doctor { json } => {
+                let report = token_doctor();
+                if json {
+                    print_json(&report)?;
+                } else {
+                    println!("Token-saving compatibility:");
+                    println!(
+                        "- rtk: {}",
+                        if report["rtk"]["available"].as_bool().unwrap_or(false) {
+                            "available"
+                        } else {
+                            "not found"
+                        }
+                    );
+                    println!(
+                        "- headroom: {}",
+                        if report["headroom"]["available"].as_bool().unwrap_or(false) {
+                            "available"
+                        } else {
+                            "not found"
+                        }
+                    );
+                    println!("\nRecommended:");
+                    println!("- vrt verify --token-profile rtk");
+                    println!("- vrt verify --token-profile headroom");
+                    println!("- vrt token manifest --json");
+                    println!("- vrt token install-rules");
+                }
+            }
+            TokenCommand::Manifest { json } => {
+                let manifest = token_compatibility_manifest();
+                if json {
+                    print_json(&manifest)?;
+                } else {
+                    println!("VRT token-saving compatibility manifest:");
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                }
+            }
+            TokenCommand::InstallRules => {
+                install_token_rules(&root)?;
+                println!("Installed token-saving compatibility rules:");
+                println!("- .vrt/token-saving/RTK_HEADROOM.md");
+                println!("- AGENTS.md");
+            }
+        },
+        Command::FalseConfidence { command } => match command {
+            FalseConfidenceCommand::Record {
+                evidence_id,
+                stricter_check,
+                failure_summary,
+                json,
+            } => {
+                let case = record_false_confidence_case(
+                    &root,
+                    evidence_id.as_deref(),
+                    &stricter_check,
+                    &failure_summary,
+                )?;
+                if json {
+                    print_json(&case)?;
+                } else {
+                    println!("Recorded false-confidence case:");
+                    println!("- case_id: {}", case.case_id);
+                    println!("- evidence_id: {}", case.evidence_id);
+                    println!("- stricter_check: {}", case.stricter_check);
+                    println!("- failure_summary: {}", case.failure_summary);
+                }
+            }
+            FalseConfidenceCommand::List { json } => {
+                let cases = list_false_confidence_cases(&root)?;
+                if json {
+                    print_json(&cases)?;
+                } else if cases.is_empty() {
+                    println!("No false-confidence cases recorded.");
+                } else {
+                    println!("False-confidence cases:");
+                    for case in cases {
+                        println!(
+                            "- {} evidence={} check={} failure={}",
+                            case.case_id,
+                            case.evidence_id,
+                            case.stricter_check,
+                            case.failure_summary
+                        );
+                    }
+                }
+            }
+        },
+        Command::Session { command } => match command {
+            SessionCommand::Start {
+                worktree,
+                branch,
+                json,
+            } => {
+                let session = start_worktree_session(&root, &worktree, branch.as_deref())?;
+                if json {
+                    print_json(&session)?;
+                } else {
+                    println!("Started VRT worktree session:");
+                    println!("- session_id: {}", session.session_id);
+                    println!("- worktree: {}", session.worktree_path);
+                    println!("- branch: {}", session.branch);
+                    println!("\nNext:");
+                    for instruction in session.instructions {
+                        println!("- {instruction}");
+                    }
+                }
+            }
+            SessionCommand::Status { json } => {
+                let session = current_worktree_session(&root)?;
+                if json {
+                    print_json(&session)?;
+                } else {
+                    println!("VRT session:");
+                    println!("- session_id: {}", session.session_id);
+                    println!("- status: {}", session.status);
+                    println!("- branch: {}", session.branch);
+                    println!("- worktree: {}", session.worktree_path);
+                    println!("- base_commit: {}", session.base_commit);
+                }
+            }
+            SessionCommand::List { json } => {
+                let sessions = list_worktree_sessions(&root)?;
+                if json {
+                    print_json(&sessions)?;
+                } else if sessions.is_empty() {
+                    println!("No VRT worktree sessions recorded.");
+                } else {
+                    println!("VRT worktree sessions:");
+                    for session in sessions {
+                        println!(
+                            "- {} branch={} worktree={} status={}",
+                            session.session_id,
+                            session.branch,
+                            session.worktree_path,
+                            session.status
+                        );
+                    }
+                }
+            }
+            SessionCommand::View { json } => {
+                let view = multi_agent_session_view(&root)?;
+                if json {
+                    print_json(&view)?;
+                } else if view.sessions.is_empty() {
+                    println!("No VRT worktree sessions recorded.");
+                } else {
+                    println!("VRT multi-Agent session view:");
+                    for item in view.sessions {
+                        let evidence = item
+                            .latest_evidence
+                            .as_ref()
+                            .map(|evidence| {
+                                format!(
+                                    "{} validity={} failed={} release={}",
+                                    evidence.evidence_id,
+                                    evidence.validity,
+                                    evidence.checks_failed,
+                                    evidence.confidence.release
+                                )
+                            })
+                            .unwrap_or_else(|| "no evidence".to_string());
+                        let lock = if item.active_lock.is_some() {
+                            "locked"
+                        } else {
+                            "unlocked"
+                        };
+                        println!(
+                            "- {} branch={} {} evidence={} false_confidence_cases={}",
+                            item.session.session_id,
+                            item.session.branch,
+                            lock,
+                            evidence,
+                            item.false_confidence_cases
+                        );
+                    }
+                }
+            }
+        },
     }
     Ok(())
+}
+
+fn token_doctor() -> serde_json::Value {
+    let rtk = command_available("rtk");
+    let headroom = command_available("headroom");
+    serde_json::json!({
+        "rtk": {
+            "available": rtk,
+            "recommended_verify": "vrt verify --token-profile rtk",
+            "proxy_usage": "rtk vrt verify --token-profile rtk"
+        },
+        "headroom": {
+            "available": headroom,
+            "recommended_verify": "vrt verify --token-profile headroom",
+            "mcp_safe": true
+        },
+        "rules": ".vrt/token-saving/RTK_HEADROOM.md",
+        "manifest": "vrt token manifest --json",
+        "preserve": ["evidence=", "report=", "raw=", "raw_log", ".vrt/evidence"]
+    })
+}
+
+fn command_available(command: &str) -> bool {
+    ProcessCommand::new(command)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn serve_mcp(root: &std::path::Path) -> Result<()> {
@@ -229,6 +596,35 @@ fn serve_mcp(root: &std::path::Path) -> Result<()> {
         if let Some(response) = handle_mcp_message(root, &line)? {
             writeln!(stdout, "{response}")?;
             stdout.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn serve_broker(root: &std::path::Path) -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(response) = handle_broker_message(root, &line)? {
+            writeln!(stdout, "{response}")?;
+            stdout.flush()?;
+            if serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("op")
+                        .or_else(|| value.get("method"))
+                        .and_then(|op| op.as_str())
+                        .map(|op| op == "shutdown")
+                })
+                .unwrap_or(false)
+            {
+                break;
+            }
         }
     }
     Ok(())
@@ -252,6 +648,7 @@ fn add_full_build_if_available(
             capability_id: cap.id.clone(),
             command: cap.command.clone(),
             cwd: cap.cwd.clone(),
+            safety_level: cap.safety_level.clone(),
             reason: "--full requested production build proof.".to_string(),
             order,
             stop_on_failure: true,
@@ -264,6 +661,41 @@ fn add_full_build_if_available(
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn human_plan(plan: &vrt_core::VerificationPlan) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Plan {}\n\n", plan.plan_id));
+    out.push_str("Steps:\n");
+    if plan.steps.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for step in &plan.steps {
+            out.push_str(&format!(
+                "- {}: {}\n  Reason: {}\n",
+                step.capability_id, step.command, step.reason
+            ));
+        }
+    }
+    out.push_str("\nSkipped:\n");
+    if plan.skipped.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for skipped in &plan.skipped {
+            out.push_str(&format!(
+                "- {}\n  Reason: {}\n  Residual risk: {}\n",
+                skipped.capability_id, skipped.reason, skipped.residual_risk
+            ));
+        }
+    }
+    out.push_str("\nExpected confidence:\n");
+    out.push_str(&format!("- local: {}\n", plan.expected_confidence.local));
+    out.push_str(&format!("- merge: {}\n", plan.expected_confidence.merge));
+    out.push_str(&format!(
+        "- release: {}\n",
+        plan.expected_confidence.release
+    ));
+    out
 }
 
 impl From<CliMode> for VerificationMode {
@@ -279,8 +711,10 @@ impl From<CliMode> for VerificationMode {
 impl From<CliReportFormat> for ReportFormat {
     fn from(value: CliReportFormat) -> Self {
         match value {
+            CliReportFormat::Markdown => ReportFormat::Markdown,
             CliReportFormat::Sarif => ReportFormat::Sarif,
             CliReportFormat::Junit => ReportFormat::Junit,
+            CliReportFormat::Otel => ReportFormat::Otel,
         }
     }
 }
@@ -288,8 +722,20 @@ impl From<CliReportFormat> for ReportFormat {
 impl CliReportFormat {
     fn label(self) -> &'static str {
         match self {
+            CliReportFormat::Markdown => "Markdown",
             CliReportFormat::Sarif => "SARIF",
             CliReportFormat::Junit => "JUnit",
+            CliReportFormat::Otel => "OpenTelemetry",
+        }
+    }
+}
+
+impl From<CliTokenProfile> for TokenProfile {
+    fn from(value: CliTokenProfile) -> Self {
+        match value {
+            CliTokenProfile::Standard => TokenProfile::Standard,
+            CliTokenProfile::Rtk => TokenProfile::Rtk,
+            CliTokenProfile::Headroom => TokenProfile::Headroom,
         }
     }
 }

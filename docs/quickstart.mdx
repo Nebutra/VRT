@@ -1,0 +1,63 @@
+---
+title: "Quickstart"
+description: "Install VRT, inspect a project, and run local verification."
+---
+
+## Install from source
+
+```bash
+cargo install --path crates/vrt-cli
+```
+
+## Try the repository example
+
+```bash
+cargo test --workspace
+npm test
+cargo run -q -p vrt-cli -- --root examples/next-single-app doctor
+cargo run -q -p vrt-cli -- --root examples/vite-ts-app doctor
+cargo run -q -p vrt-cli -- --root examples/prisma-next-app doctor
+cargo run -q -p vrt-cli -- --root examples/next-turbo-pnpm doctor
+cargo run -q -p vrt-cli -- --root examples/nx-workspace doctor
+```
+
+## Run VRT in a JS/TS project
+
+```bash
+vrt init
+vrt doctor
+vrt verify --dry-run
+vrt verify
+vrt explain
+vrt skill install
+```
+
+## Agent-first commands
+
+```bash
+vrt verify --json
+vrt verify --dry-run --json
+vrt explain --json
+vrt mcp serve
+```
+
+`vrt verify --dry-run --json` lets agents inspect the plan without running commands. `vrt verify --json` is the primary execution response. It includes failure kind, prioritized root-cause candidates, do-not-run guidance, confidence, residual risks, raw log references, and the full evidence record.
+
+## Token-saving output
+
+```bash
+vrt verify --token-profile rtk
+vrt verify --token-profile headroom
+vrt token doctor
+vrt token manifest --json
+vrt token install-rules
+```
+
+## Reports
+
+```bash
+vrt report --format markdown --output .vrt/reports/vrt.md
+vrt report --format sarif --output .vrt/reports/vrt.sarif
+vrt report --format junit --output .vrt/reports/vrt.junit.xml
+vrt report --format otel --output .vrt/reports/vrt.otel.json
+```

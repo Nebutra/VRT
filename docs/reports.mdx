@@ -1,0 +1,54 @@
+---
+title: "Reports"
+description: "Export evidence as Markdown, SARIF, JUnit, or OpenTelemetry JSON without rerunning verification."
+---
+
+VRT can export the latest evidence into human-shareable and CI-facing formats.
+
+```bash
+vrt report --format markdown --output .vrt/reports/vrt.md
+vrt report --format sarif --output .vrt/reports/vrt.sarif
+vrt report --format junit --output .vrt/reports/vrt.junit.xml
+vrt report --format otel --output .vrt/reports/vrt.otel.json
+```
+
+## Markdown
+
+Markdown export writes a PR-ready verification report from the latest evidence. It includes:
+
+- evidence id, session id, plan id, diff hash, and profile hash
+- local, merge, and release confidence
+- run and reused checks with commands, safety levels, summaries, and raw log paths
+- skipped checks with residual risk
+- stale evidence notes when a continuation could not reuse previous proof
+
+Use it when an agent needs a compact artifact to paste into a pull request, issue, or final user-facing verification summary.
+
+## SARIF
+
+SARIF export writes failed checks as SARIF 2.1.0 results. Each result includes:
+
+- rule id
+- failure summary
+- source location when extractable
+- raw log path
+- evidence id
+
+## JUnit
+
+JUnit export writes run and reused checks as testcases. Failed checks include a `<failure>` element with command and raw log path.
+
+## OpenTelemetry JSON
+
+OpenTelemetry export writes OTLP/JSON-style `resourceSpans` from the latest evidence.
+
+The trace includes:
+
+- one `vrt.verify` root span for the verification run
+- one `vrt.check.<capability>` span for each run or reused check
+- one `vrt.skipped.<capability>` span for each skipped check
+- evidence id, plan id, session id, diff hash, profile hash, confidence, raw log path, report path, and skipped-check residual risk attributes
+
+Trace and span ids are derived from the evidence content, so exporting the same evidence is stable.
+
+Reports are derived from evidence only; exporting does not rerun verification.

@@ -1,0 +1,89 @@
+---
+title: "Evidence ledger"
+description: "Where VRT stores auditable verification evidence and raw logs."
+---
+
+Every `vrt verify` writes:
+
+- `.vrt/profile.json`
+- `.vrt/config.toml`
+- `.vrt/run.lock/lock.json` while verification is active
+- `.vrt/latest.json`
+- `.vrt/evidence/<evidence-id>/evidence.json`
+- `.vrt/evidence/<evidence-id>/*.raw.log`
+- `.vrt/cache/evidence/<cache-key>.json` when valid evidence is reusable by an exact match
+- `.vrt/session.json` and `.vrt/sessions/<session-id>.json` when a worktree session is created
+- `.vrt/false-confidence.jsonl` when stricter follow-up checks reveal over-claimed confidence
+
+Evidence records include:
+
+- schema version
+- checks run
+- check safety levels
+- checks skipped
+- confidence
+- residual risks
+- base commit
+- diff hash
+- profile hash
+- lockfile hash
+- config hash
+- toolchain version
+- relevant inputs hash
+- environment assumptions
+- session id
+- dirty worktree state
+- changed file paths
+- raw log paths
+
+Timed-out commands are failed evidence, not skipped evidence. Their raw logs include a `[vrt] timed out after ...ms` line and their `exit_code` is `null`.
+
+## Evidence cache
+
+VRT keeps a conservative local evidence cache for repeated identical verification requests. A cache entry is eligible only when the source evidence is `valid`, has no stale reasons, and matches the current `plan_id`, base commit, diff hash, profile hash, lockfile hash, config hash, toolchain version, relevant inputs hash, runtime env assumptions, selected steps, and skipped checks.
+
+A cache hit still writes a new evidence record. The new record has a fresh `evidence_id` and current `session_id`, sets `continued_from` to the source evidence, and moves the source checks into `reused_checks`. Failed, partial, stale, or mismatched evidence is a cache miss.
+
+This is evidence reuse, not silent passing. Agents should still report reused checks and residual risks.
+
+`vrt verify --continue` is equally conservative. It reuses passed checks from partial evidence only when base commit, diff hash, profile hash, config hash, toolchain version, environment assumptions, and relevant inputs hash still match. When any scope input changes, VRT records stale reasons and reruns the plan instead of stitching old checks into new evidence.
+
+`vrt bench --json` uses these records to compute `cache_hits`, `cache_hit_rate`, `evidence_reuse_rate`, `reused_checks`, `reruns_avoided`, `ci_failures_shifted_left`, and a conservative `saved_by` breakdown. The cache metrics are derived from evidence records with `continued_from` and `reused_checks`; CI shift-left is derived from local failed evidence that stopped before broader skipped checks.
+
+## Schema versioning
+
+Profile JSON, evidence JSON, false-confidence JSONL rows, and `.vrt/config.toml` include `schema_version = 1` / `"schema_version": 1`. Agents and CI integrations should treat this as the compatibility boundary for parsing VRT output.
+
+## False-confidence cases
+
+False confidence is corrective evidence. It means a stricter verification later failed for a reason the earlier confidence level should have covered.
+
+Use:
+
+```bash
+vrt false-confidence record \
+  --stricter-check "vrt verify --mode release --full" \
+  --failure-summary "release build failed on an issue local confidence should not have missed"
+```
+
+Each row in `.vrt/false-confidence.jsonl` stores the original `evidence_id`, previous confidence, validity, diff hash, profile hash, stricter check, and failure summary. Do not delete the original evidence; the false-confidence case is linked to it.
+
+## Worktree lock
+
+VRT creates `.vrt/run.lock` before executing verification commands and removes it when the run finishes, including failed runs. If another session tries to verify the same worktree while the lock is active, VRT refuses to start and reports the active `session_id` and `plan_id`.
+
+If the second request has the same `plan_id`, VRT treats it as a singleflight join. It waits for `.vrt/latest.json` to contain matching `plan_id`, `profile_hash`, `base_commit`, and `diff_hash`, then returns that evidence instead of running duplicate commands.
+
+Different plans still fail fast while the lock is active. This is a local guard against multi-Agent evidence pollution. Agents should not bypass it by running competing build, test, lint, or typecheck commands directly. If a process crashed, remove `.vrt/run.lock` only after confirming no VRT run is still active.
+
+## Worktree session metadata
+
+`vrt session start --worktree <path>` writes stable session metadata in the original repository and the new worktree. This is separate from the short-lived `.vrt/run.lock`.
+
+The metadata records the original root, worktree path, branch, base commit, session id, and instructions for exporting `VRT_SESSION_ID` before running verification.
+
+## Core rule
+
+Skipped checks are represented as residual risk. A successful local run can raise local confidence, but release confidence remains insufficient unless release-mode verification and external CI/deployment checks exist.
+
+Skipped is not passed.

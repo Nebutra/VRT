@@ -1,0 +1,62 @@
+---
+title: "GitHub Action"
+description: "Publish VRT evidence into GitHub Actions outputs and step summaries."
+---
+
+`@vrt/github-action` reads existing VRT evidence. It does not run verification by itself.
+
+Use it after a `vrt verify --json` step to turn `.vrt/latest.json` into GitHub outputs, a Markdown step summary, and an optional Markdown report artifact.
+
+```yaml
+name: VRT
+
+on:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: vrt verify --json
+      - uses: ./packages/github-action
+        with:
+          evidence-path: .vrt/latest.json
+          fail-on-partial: "true"
+          report-output-path: .vrt/reports/vrt.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vrt-evidence-report
+          path: .vrt/reports/vrt.md
+```
+
+## Outputs
+
+- `vrt_status`
+- `vrt_evidence_id`
+- `vrt_failed_checks`
+- `vrt_skipped_checks`
+- `vrt_report_path`
+
+## Summary
+
+The step summary includes:
+
+- evidence id
+- validity
+- local, merge, and release confidence
+- failed checks with raw log paths
+- skipped checks as residual risk
+- stale evidence notes
+
+If `fail-on-partial` is true, the action exits non-zero unless evidence validity is `valid`.
+
+## Markdown report file
+
+Set `report-output-path` to write the same evidence summary to disk. This is useful for:
+
+- upload-artifact retention
+- PR comment bots
+- release checklist attachments
+- maintainer handoff when CI fails before later jobs run

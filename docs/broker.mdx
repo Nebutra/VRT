@@ -1,0 +1,71 @@
+---
+title: "Broker"
+description: "A local JSONL broker protocol for token-saving agents that need bounded VRT operations without shell escape."
+---
+
+`vrt broker serve` starts a local line-oriented JSON broker over stdio. It is designed for agents and token-saving wrappers that want a compact control plane without implementing the full MCP JSON-RPC surface.
+
+The broker exposes the same bounded VRT operations as MCP and deliberately does not expose arbitrary shell execution. Every verification run still goes through the VRT planner, runner, run lock, raw logs, and evidence ledger.
+
+## Commands
+
+```bash
+vrt broker status
+vrt broker status --json
+vrt broker serve
+```
+
+`vrt broker status --json` returns protocol metadata, the current repository root, active run lock state, latest evidence summary, session view, allowed tools, and forbidden capabilities.
+
+## Protocol
+
+Each request is one JSON object on one line. Each response is one JSON object on one line.
+
+Requests can use either `op` plus `arguments` or `method` plus `params`:
+
+```json
+{"id":"1","op":"status"}
+```
+
+```json
+{"id":"2","method":"plan_verification","params":{"mode":"merge","token_profile":"rtk"}}
+```
+
+Responses keep the original `id` and return an `ok` flag:
+
+```json
+{"id":"1","ok":true,"result":{"protocol":"vrt-broker/1"}}
+```
+
+Unknown operations are structured errors:
+
+```json
+{"id":"bad","ok":false,"error":"Unknown broker operation: run_any_shell_command"}
+```
+
+## Operations
+
+- `status`: inspect broker protocol, latest evidence, active lock, session view, and allowed tools.
+- `analyze_change`: profile the current diff and risk tags.
+- `plan_verification`: return the verification plan for a mode and token profile.
+- `run_verification`: execute the bounded verification plan and write evidence.
+- `explain_failure`: summarize the latest failed evidence, or pass `evidence_id` to target a specific record.
+- `get_evidence`: return the latest evidence, or pass `evidence_id` to target a specific record.
+- `escalate_verification`: compute stricter follow-up checks for residual risk.
+- `session_view`: aggregate worktree sessions, latest evidence, active locks, confidence, and false-confidence counts.
+- `shutdown`: ask a long-running broker process to exit after responding.
+
+## Token-saving compatibility
+
+RTK and Headroom can call the broker with `token_profile` set to `rtk` or `headroom` on planning and run operations. The response preserves evidence ids, hashes, skipped-check residual risk, and raw log pointers so agents can summarize aggressively without losing verification proof.
+
+```bash
+printf '%s\n' \
+  '{"id":"status","op":"status"}' \
+  '{"id":"plan","op":"plan_verification","arguments":{"mode":"merge","token_profile":"headroom"}}' \
+  '{"id":"run","op":"run_verification","arguments":{"mode":"dev","token_profile":"rtk"}}' \
+  '{"id":"stop","op":"shutdown"}' \
+  | vrt broker serve
+```
+
+Use MCP when the host already supports Resources, Prompts, and Tools. Use the broker when a local agent runtime only needs JSONL request/response operations.

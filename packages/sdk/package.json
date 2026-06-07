@@ -1,7 +1,12 @@
 {
   "name": "@vrt/sdk",
   "version": "0.1.0",
+  "description": "Node SDK for calling VRT verification, explanation, and token-saving commands.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nebutra/vrt.git"
+  },
   "main": "./src/index.js",
   "types": "./src/index.d.ts",
   "exports": {

@@ -1,0 +1,36 @@
+---
+title: "Introduction"
+description: "Agent-native local verification runtime for serious, low-latency engineering feedback."
+---
+
+<img src="/assets/vrt-hero.png" alt="VRT verification runtime hero" />
+
+VRT is an agent-native local verification runtime. It looks at the current Git diff, understands the JS/TS project, plans the smallest serious verification path, runs project-owned checks, and writes an auditable evidence ledger before CI.
+
+The promise is not "skip tests." The promise is:
+
+- Run high-signal checks first.
+- Avoid unnecessary full builds during small local loops.
+- Preserve raw logs and explain failures.
+- Report skipped checks as residual risk, never as passed.
+- Give agents JSON they can act on without reading thousands of log lines.
+
+## Why agents need VRT
+
+Coding agents are fast at edits and slow at verification judgment. A small component change can trigger a full build, long test run, noisy failure, then another rerun after the agent patches the wrong thing.
+
+VRT inserts a verification planning layer between Git and CI:
+
+```text
+Git diff -> Project profile -> Capability graph -> Verification plan -> Runner -> Evidence ledger
+```
+
+That gives agents a local feedback loop with lower latency and a stronger audit trail.
+
+## What VRT is
+
+VRT is a verification planning and evidence layer between Git and CI. It reuses your existing tools instead of replacing them: TypeScript, ESLint, Biome, Vitest, Jest, Playwright, Prisma, Turborepo, Nx, and your package manager scripts.
+
+## What VRT is not
+
+VRT is not a CI replacement, build-system replacement, test runner, typechecker, or log-compression trick. Acceleration comes from planning and sequencing verification, not from pretending skipped checks passed.

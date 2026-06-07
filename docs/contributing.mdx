@@ -1,0 +1,40 @@
+---
+title: "Contributing"
+description: "How to contribute to VRT without weakening verification evidence or release readiness."
+---
+
+VRT accepts changes that keep verification fast and serious. The guiding rule is simple: skipped checks are not passed checks.
+
+## Local gate
+
+Run the same checks used by the release workflow:
+
+```bash
+cargo fmt --all --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+npm test
+npm run docs:check
+```
+
+## Evidence discipline
+
+- Keep raw logs retrievable under `.vrt/evidence/**`.
+- Preserve evidence id, session id, diff hash, profile hash, confidence, skipped checks, and residual risks in agent-facing output.
+- Do not cache failed, partial, stale, or mismatched evidence.
+- Do not raise release confidence from a dev-mode run.
+- Use `vrt explain --json` before changing code after a failed verification.
+
+## Documentation changes
+
+Mintlify pages live in `docs/*.mdx` and navigation lives in `docs.json`. When you add a command, report field, package surface, protocol operation, or Agent workflow, update the docs in the same change.
+
+## Pull request checklist
+
+- Summarize what changed.
+- Include the verification commands that ran.
+- List skipped checks and residual risk.
+- Link or quote the relevant VRT evidence path.
+- State whether release readiness was proven or remains insufficient.
+
+See [CONTRIBUTING.md](https://github.com/nebutra/vrt/blob/main/CONTRIBUTING.md) for the repository-level guide.

@@ -1,0 +1,59 @@
+---
+title: "TypeScript SDK"
+description: "ESM helpers for Node-based agents and JS/TS tooling."
+---
+
+`@vrt/sdk` is intentionally thin. It does not reimplement planning logic in TypeScript; it calls the native CLI and parses JSON or compact text.
+
+```js
+import { plan, verify, explain, tokenDoctor, tokenManifest, tokenInstallRules } from "@vrt/sdk";
+
+const dryRunPlan = await plan({ mode: "merge" });
+const evidence = await verify({ mode: "dev" });
+const headroomEvidence = await verify({ tokenProfile: "headroom" });
+const rtkText = await verify({ tokenProfile: "rtk" });
+const explanation = await explain();
+const tokenStatus = await tokenDoctor();
+const tokenContract = await tokenManifest();
+await tokenInstallRules();
+```
+
+`plan()` returns the same JSON shape as `vrt verify --dry-run --json` and does not execute project commands. `verify()` returns the same JSON shape as `vrt verify --json`: an agent report with top-level failure guidance and a nested `evidence` record. If verification fails, the SDK throws `VrtCommandError`; the parseable JSON report remains in `error.stdout`.
+
+## Package surfaces
+
+- `packages/sdk`: ESM SDK exposing `plan`, `verify`, `doctor`, `explain`, `bench`, `tokenDoctor`, `tokenManifest`, `tokenInstallRules`, `runJson`, `runText`, and `resolveVrtBinary`.
+- `packages/vrt`: npm `vrt` bin wrapper that resolves `VRT_BIN`, packaged platform binaries, locally built Rust binaries, then `vrt` on PATH.
+
+Command failures preserve exit code, stdout, stderr, and the exact command for agent diagnostics.
+
+## Native npm package staging
+
+`packages/vrt` includes a `prepack` script:
+
+```bash
+npm --workspace vrt run build:binary
+npm --workspace vrt run stage:binary
+```
+
+The staging step copies the release binary into `packages/vrt/bin/<platform>-<arch>/vrt` or `vrt.exe` on Windows. The published package includes `bin` and `src`, so installed agents can run `vrt` without requiring `cargo` on the target machine.
+
+## Release workflow
+
+`.github/workflows/release.yml` runs the full quality gate on pull requests and `main`:
+
+- `cargo fmt --all -- --check`
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `npm test`
+- `npm run docs:check`
+
+For version tags and manual dispatch, it also builds Linux, macOS, and Windows native binary artifacts, downloads them into one `packages/vrt/bin/*` layout, and packs a single `vrt-*.tgz` npm artifact.
+
+The publish job is separated from assembly. It runs in the `npm` environment, requests `id-token: write`, downloads the assembled tarball, and runs:
+
+```bash
+npm publish vrt-*.tgz --provenance --access public
+```
+
+Manual dispatch publishes only when `publish_to_npm` is set to `true`; otherwise it only builds artifacts. Configure npm trusted publishing for the repository before enabling that gate.

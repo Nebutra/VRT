@@ -1,0 +1,48 @@
+---
+title: "Monorepos"
+description: "How VRT delegates affected task selection to Turborepo and Nx."
+---
+
+VRT detects Turborepo and Nx from existing project files. It does not rebuild their project graph. Instead, VRT creates capabilities that delegate affected selection to the project's own monorepo tool.
+
+The project profile still records workspace nodes from `apps/*`, `packages/*`, and nested `package.json` files. A component change under `apps/web/components/*` is scoped to `apps-web` even if that app does not have its own manifest. When a changed package has a package name and another app/package depends on that name, VRT includes both the changed package and its direct dependents in `affected_nodes`. This gives agents a useful scope hint even before Turborepo or Nx executes the final affected task selection.
+
+## Turborepo
+
+When VRT detects `turbo.json` or a `turbo` dependency, workspace script capabilities use:
+
+```bash
+pnpm turbo run <task> --affected
+```
+
+The package manager prefix changes with the project:
+
+- `pnpm turbo run <task> --affected`
+- `yarn turbo run <task> --affected`
+- `bunx turbo run <task> --affected`
+- `npx turbo run <task> --affected`
+
+Turborepo's `--affected` flag filters packages affected by Git changes. VRT keeps its own evidence and residual risk model around that execution.
+
+## Nx
+
+When VRT detects `nx.json` or an `nx` dependency, workspace script capabilities use:
+
+```bash
+pnpm nx affected -t <task>
+```
+
+The package manager prefix changes with the project:
+
+- `pnpm nx affected -t <task>`
+- `yarn nx affected -t <task>`
+- `bunx nx affected -t <task>`
+- `npx nx affected -t <task>`
+
+Nx decides the affected project set. VRT decides verification order, captures logs, writes evidence, and reports confidence.
+
+## Boundary
+
+VRT does not replace Turborepo or Nx. It uses them as graph-aware execution engines when they are present. If neither is detected, VRT falls back to package-manager scripts such as `pnpm typecheck`, `npm run test`, or `bun run build`.
+
+Without Turborepo or Nx, VRT's dependency inference is intentionally shallow: direct package dependents from workspace `package.json` files are included in `affected_nodes`, but command execution still goes through the configured workspace scripts.

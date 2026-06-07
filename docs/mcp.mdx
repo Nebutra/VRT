@@ -1,0 +1,67 @@
+---
+title: "MCP"
+description: "Model Context Protocol resources, prompts, and tools for agent verification workflows."
+---
+
+`vrt mcp serve` implements a small JSON-RPC stdio server for the core Agent workflow. It exposes VRT through the three MCP primitives agents need for low-token verification: Resources for context, Prompts for guided workflows, and Tools for execution.
+
+For runtimes that only need line-oriented JSON requests instead of MCP Resources, Prompts, and Tools, use [Broker](/docs/broker).
+
+Supported JSON-RPC methods:
+
+- `initialize`
+- `resources/list`
+- `resources/read`
+- `prompts/list`
+- `prompts/get`
+- `tools/list`
+- `tools/call`
+
+## Resources
+
+Resources give an agent compact, retrievable context without rerunning commands.
+
+- `vrt://profile`: current project profile as JSON.
+- `vrt://latest-evidence`: latest `.vrt/latest.json` evidence as JSON.
+- `vrt://skill`: VRT verification rules as Markdown.
+- `vrt://token-rules`: RTK and Headroom evidence-preservation rules as Markdown.
+- `vrt://token-compatibility`: machine-readable RTK and Headroom compatibility manifest as JSON.
+
+## Prompts
+
+Prompts package the standard VRT agent workflows:
+
+- `verify_after_change`: plan, run, inspect evidence, and handle failures.
+- `explain_failure`: inspect latest or specific failed evidence before making another code change.
+- `write_verification_report`: produce a concise user-facing report from evidence.
+
+## Tools
+
+Exposed tools:
+
+- `analyze_change`
+- `plan_verification`
+- `run_verification`
+- `explain_failure` with optional `evidence_id`
+- `get_evidence` with optional `evidence_id`
+- `escalate_verification`
+
+The server does not expose arbitrary shell execution. Unknown tools return a JSON-RPC protocol error. Tool execution failures return tool results with `isError: true` so agents can inspect and self-correct.
+
+## Examples
+
+```bash
+printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' | vrt mcp serve
+```
+
+```bash
+printf '{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"vrt://profile"}}\n' | vrt mcp serve
+```
+
+```bash
+printf '{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"verify_after_change","arguments":{"mode":"merge"}}}\n' | vrt mcp serve
+```
+
+```bash
+printf '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"explain_failure","arguments":{"evidence_id":"ev_123"}}}\n' | vrt mcp serve
+```

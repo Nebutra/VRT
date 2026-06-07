@@ -1,14 +1,26 @@
 {
   "name": "vrt",
   "version": "0.1.0",
+  "description": "Agent-native local verification runtime CLI for fast, auditable code checks.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nebutra/vrt.git"
+  },
   "bin": {
     "vrt": "./bin/vrt.js"
   },
   "exports": {
     ".": "./src/index.js"
   },
+  "files": [
+    "bin",
+    "src"
+  ],
   "scripts": {
+    "build:binary": "cargo build --release -p vrt-cli",
+    "stage:binary": "node scripts/stage-platform-binary.mjs",
+    "prepack": "npm run build:binary && npm run stage:binary",
     "test": "node --test test/*.test.js"
   },
   "license": "MIT"

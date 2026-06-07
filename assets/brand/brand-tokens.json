@@ -1,0 +1,19 @@
+{
+  "name": "VRT",
+  "positioning": "Agent-native local verification runtime",
+  "tagline": "Stop making coding agents wait for the wrong checks.",
+  "colors": {
+    "warmWhite": "#F7F4EE",
+    "paper": "#FFFCF6",
+    "softGray": "#E5E7EB",
+    "graphite": "#1F2933",
+    "deepGraphite": "#111827",
+    "cobalt": "#1D4ED8",
+    "paleCobalt": "#BFD7FF",
+    "riskAmber": "#F59E0B"
+  },
+  "type": {
+    "display": "Inter, Geist, ui-sans-serif, system-ui, sans-serif",
+    "mono": "JetBrains Mono, SFMono-Regular, ui-monospace, monospace"
+  }
+}

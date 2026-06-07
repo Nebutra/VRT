@@ -1,0 +1,28 @@
+name: "VRT Evidence Report"
+description: "Read VRT evidence and publish GitHub Actions outputs, a step summary, and optional Markdown report file."
+inputs:
+  evidence-path:
+    description: "Path to VRT evidence JSON."
+    required: false
+    default: ".vrt/latest.json"
+  fail-on-partial:
+    description: "Fail the step when evidence validity is partial or invalid."
+    required: false
+    default: "true"
+  report-output-path:
+    description: "Optional path to write the Markdown evidence report for upload-artifact or PR comments."
+    required: false
+outputs:
+  vrt_status:
+    description: "Evidence validity: valid, partial, or invalid."
+  vrt_evidence_id:
+    description: "VRT evidence id."
+  vrt_failed_checks:
+    description: "Number of failed checks."
+  vrt_skipped_checks:
+    description: "Number of skipped checks."
+  vrt_report_path:
+    description: "Path to the Markdown evidence report when report-output-path is set."
+runs:
+  using: "node20"
+  main: "src/index.js"
