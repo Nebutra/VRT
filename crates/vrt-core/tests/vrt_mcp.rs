@@ -137,6 +137,10 @@ fn broker_plans_and_runs_verification_with_jsonl_requests() {
         run["result"]["evidence"]["evidence_id"]
     );
     assert_eq!(run["result"]["evidence"]["schema_version"], 1);
+    assert!(run["result"]["evidence"]["broker_job_id"]
+        .as_str()
+        .expect("broker job id")
+        .starts_with("job_"));
     assert!(run["result"]["evidence"]["checks"]
         .as_array()
         .unwrap()
@@ -223,6 +227,14 @@ fn mcp_lists_structured_tools_without_free_shell_escape_hatch() {
     assert!(names.contains(&"explain_failure"));
     assert!(names.contains(&"get_evidence"));
     assert!(names.contains(&"escalate_verification"));
+    assert!(names.contains(&"get_broker_status"));
+    assert!(names.contains(&"list_sessions"));
+    assert!(names.contains(&"show_session"));
+    assert!(names.contains(&"list_queue"));
+    assert!(names.contains(&"cancel_job"));
+    assert!(names.contains(&"list_locks"));
+    assert!(names.contains(&"start_session"));
+    assert!(names.contains(&"close_session"));
     assert!(!names.contains(&"run_any_shell_command"));
     assert!(tools
         .iter()

@@ -56,6 +56,7 @@ That gives agents a local feedback loop with lower latency and a better audit tr
 - Bench summary for avoided expensive checks.
 - MCP stdio server with structured resources, prompts, tools, and no arbitrary shell tool.
 - Local JSONL broker for token-saving agents that need bounded VRT operations without the full MCP envelope.
+- Repo-local broker state with queue, lock, runner-pool, and session control-plane commands.
 - TypeScript SDK and npm bin wrapper packages.
 - GitHub Action package that turns evidence into CI outputs and step summaries.
 - SARIF, JUnit, and OpenTelemetry JSON export from latest evidence.
@@ -95,7 +96,13 @@ vrt token install-rules
 vrt session start --worktree ../my-repo-agent-a
 vrt session status --json
 vrt session list --json
+vrt session show <session-id> --json
+vrt session close <session-id> --json
 vrt session view --json
+vrt broker start --json
+vrt broker stop --json
+vrt queue status --json
+vrt lock list --json
 vrt report --format markdown --output .vrt/reports/vrt.md
 vrt report --format sarif --output .vrt/reports/vrt.sarif
 vrt report --format junit --output .vrt/reports/vrt.junit.xml
@@ -180,6 +187,8 @@ vrt verify --mode merge
 vrt verify --mode release
 vrt verify --full
 vrt verify --continue
+vrt verify --broker
+vrt verify --no-broker
 vrt verify --token-profile rtk
 vrt verify --token-profile headroom
 vrt explain
@@ -299,9 +308,9 @@ Every `vrt verify` writes:
 - `.vrt/evidence/<evidence-id>/*.raw.log`
 - `.vrt/cache/evidence/<cache-key>.json` for exact-match valid evidence reuse
 
-Reports include checks run, check safety levels, checks skipped, confidence, residual risks, diff hash, session id, lockfile hash, config hash, toolchain version, relevant inputs hash, environment assumptions, dirty worktree state, changed file paths, and raw log paths.
+Reports include checks run, check safety levels, checks skipped, confidence, residual risks, diff hash, session id, lockfile hash, config hash, toolchain version, relevant inputs hash, environment assumptions, dirty worktree state, changed file paths, raw log paths, broker job id, queue wait, lock wait, singleflight metadata, resource lock observations, and runner-pool class.
 
-Profile JSON, evidence JSON, false-confidence JSONL rows, and `.vrt/config.toml` include schema version `1`. Agents and CI integrations should treat `schema_version` as the compatibility boundary for parsing VRT output.
+Profile JSON, evidence JSON, false-confidence JSONL rows, and `.vrt/config.toml` carry `schema_version = 1` only as a parser compatibility boundary. It is not a VRT release number, feature milestone, or changelog mechanism.
 
 `.vrt/config.toml` is a policy overlay, not a command rule pile. Today VRT uses `[policy].default_mode` when `vrt verify`, MCP, or the JSONL broker are called without an explicit mode, uses `[policy.strict].areas` to escalate matching risk tags into broader local plans, uses `[policy.relaxed].areas` to keep low-risk docs/marketing/style changes in faster loops, and respects `[release]` policy for build proof and external CI disclosure. Existing config is preserved by future `vrt init` and `vrt verify` runs, so user policy is not overwritten.
 
@@ -309,13 +318,13 @@ If a stricter follow-up check fails for a reason an earlier confidence level sho
 
 `vrt verify --continue` links new evidence to `.vrt/latest.json`. It reuses prior passed checks only when the previous evidence is partial and the base commit, profile hash, diff hash, config hash, toolchain version, environment assumptions, and relevant inputs hash still match. If any scope input changed after a patch, VRT does not reuse old checks and records stale reasons instead.
 
-If another verification is already running in the same worktree, VRT checks the active lock. The same `plan_id` can singleflight-join and reuse matching `.vrt/latest.json` evidence when the plan id, base commit, diff hash, and profile hash match. Different plans are refused while the lock is active. If a process crashed, remove `.vrt/run.lock` only after confirming no VRT run is active.
+If another verification is already running in the same worktree, VRT checks the active lock. The same `plan_id` can singleflight-join and reuse matching `.vrt/latest.json` evidence when the plan id, base commit, diff hash, and profile hash match. The follower writes its own evidence record with `singleflight.role = "follower"`, `shared_from_evidence_id`, and scoped `reused_checks`, so each session gets an auditable reference without rerunning the same command. Different plans are refused while the lock is active. If a process crashed, remove `.vrt/run.lock` only after confirming no VRT run is active.
 
 For repeated local requests after a valid run, VRT can reuse an exact-match cached evidence entry instead of rerunning commands. A cache hit requires the same `plan_id`, base commit, diff hash, profile hash, lockfile hash, config hash, toolchain version, relevant inputs hash, runtime env assumptions, selected steps, and skipped checks. The new evidence record gets its own evidence id and session id, sets `continued_from` to the source evidence, and puts prior passed checks in `reused_checks`. Failed, partial, stale, or mismatched evidence is never used as a cache source.
 
-`vrt bench --json` reports `cache_hits`, `cache_hit_rate`, `evidence_reuse_rate`, `reused_checks`, `reruns_avoided`, `early_failures`, `ci_failures_shifted_left`, `stale_evidence_detected`, `log_lines_compressed`, `agent_tokens_saved_estimate`, `estimated_saved_time_ms`, and a `saved_by` breakdown for skipped expensive checks and exact evidence reuse. These are conservative local estimates; skipped checks remain residual risk.
+`vrt bench --json` reports `cache_hits`, `cache_hit_rate`, `evidence_reuse_rate`, `reused_checks`, `reruns_avoided`, `early_failures`, `ci_failures_shifted_left`, `stale_evidence_detected`, `log_lines_compressed`, `agent_tokens_saved_estimate`, `queue_wait_time_ms`, `lock_wait_time_ms`, `singleflight_hits`, `duplicate_commands_avoided`, `resource_conflicts_avoided`, `runner_pool_utilization`, `session_count`, `shared_evidence_count`, `estimated_saved_time_ms`, and a `saved_by` breakdown for skipped expensive checks and exact evidence reuse. These are conservative local estimates; skipped checks remain residual risk.
 
-`vrt session start --worktree <path>` creates an optional git worktree session for parallel Agent work. VRT writes session metadata under `.vrt/session.json` and `.vrt/sessions/<session-id>.json` in both the original repository and the new worktree. Agents should `cd` into the worktree and export the shown `VRT_SESSION_ID` before running verification. `vrt session view --json` aggregates all recorded sessions with latest evidence, active lock state, confidence, and false-confidence counts.
+`vrt verify --broker` submits the run through the repo-local broker control plane and writes `.vrt/broker/jobs/<job-id>.json`; the evidence includes `broker_job_id`. If broker state is running, `vrt verify` uses that path automatically unless `--no-broker` is passed. `vrt session start --worktree <path>` creates an optional git worktree session for parallel Agent work. VRT writes session metadata under `.vrt/session.json` and `.vrt/sessions/<session-id>.json` in both the original repository and the new worktree. Agents should `cd` into the worktree and export the shown `VRT_SESSION_ID` before running verification. `vrt session view --json` aggregates all recorded sessions with latest evidence, active lock state, confidence, and false-confidence counts.
 
 `vrt report --format markdown|sarif|junit|otel --output <path>` exports the latest evidence without rerunning checks. Markdown is a PR-ready proof artifact with confidence, residual risks, and raw-log references. SARIF contains failed checks as code-scanning results. JUnit contains every run or reused check as a testcase. OpenTelemetry JSON contains a `vrt.verify` root span plus check and skipped-check child spans with evidence, confidence, raw-log, and residual-risk attributes.
 

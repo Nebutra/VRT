@@ -35,6 +35,11 @@ Evidence records include:
 - dirty worktree state
 - changed file paths
 - raw log paths
+- broker job id when verification came through the broker
+- queue wait and lock wait durations
+- singleflight role and shared evidence id when evidence is shared
+- resource lock observations
+- runner-pool class
 
 Timed-out commands are failed evidence, not skipped evidence. Their raw logs include a `[vrt] timed out after ...ms` line and their `exit_code` is `null`.
 
@@ -50,9 +55,17 @@ This is evidence reuse, not silent passing. Agents should still report reused ch
 
 `vrt bench --json` uses these records to compute `cache_hits`, `cache_hit_rate`, `evidence_reuse_rate`, `reused_checks`, `reruns_avoided`, `ci_failures_shifted_left`, and a conservative `saved_by` breakdown. The cache metrics are derived from evidence records with `continued_from` and `reused_checks`; CI shift-left is derived from local failed evidence that stopped before broader skipped checks.
 
-## Schema versioning
+## Concurrency Fields
 
-Profile JSON, evidence JSON, false-confidence JSONL rows, and `.vrt/config.toml` include `schema_version = 1` / `"schema_version": 1`. Agents and CI integrations should treat this as the compatibility boundary for parsing VRT output.
+Evidence records include queue, lock, singleflight, resource, and runner-pool fields even for direct CLI runs. Direct runs write zero wait time and `singleflight.role = "none"`. Brokered runs fill `broker_job_id` and write `.vrt/broker/jobs/<job-id>.json`. Broker-managed runs can also fill wait durations, follower/leader role, shared evidence references, and resource locks such as `.next`, `prisma-client`, `port-3000`, and `playwright-browser`.
+
+For exclusive resource locks, `lock_wait_ms` records total broker lock wait time and each exclusive resource lock records `waited_ms`. Active locks are visible through `vrt lock list --json`; stale lock files are cleaned before retry so a crashed broker does not permanently block local verification.
+
+Shared or reused evidence is scoped evidence, not universal proof. A singleflight follower writes a fresh evidence record with `continued_from`, `singleflight.role = "follower"`, `singleflight.key`, and `singleflight.shared_from_evidence_id`. Reports must preserve the source evidence id and validity scope, especially when release confidence remains insufficient.
+
+## Parser compatibility
+
+Profile JSON, evidence JSON, false-confidence JSONL rows, and `.vrt/config.toml` carry `schema_version = 1` / `"schema_version": 1` only as a parser compatibility boundary. It is not a VRT release number, feature milestone, or changelog mechanism.
 
 ## False-confidence cases
 

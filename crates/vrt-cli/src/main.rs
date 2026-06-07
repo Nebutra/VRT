@@ -5,13 +5,15 @@ use std::process::Command as ProcessCommand;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use vrt_core::{
-    analyze_change, bench_summary, broker_status, build_capability_graph, current_worktree_session,
-    explain_latest, export_report, handle_broker_message, handle_mcp_message, human_report,
-    initialize_project, install_skill, install_token_rules, list_false_confidence_cases,
-    list_worktree_sessions, multi_agent_session_view, plan_verification, profile_project,
-    record_false_confidence_case, render_agent_report, render_token_report,
-    resolve_verification_mode, run_verification, run_verification_continue, start_worktree_session,
-    token_compatibility_manifest, ReportFormat, TokenProfile, VerificationMode,
+    analyze_change, bench_summary, broker_status, build_capability_graph, cancel_queue_job,
+    close_session_context, current_worktree_session, explain_latest, export_report,
+    handle_broker_message, handle_mcp_message, human_report, initialize_project, install_skill,
+    install_token_rules, list_false_confidence_cases, list_session_contexts,
+    list_worktree_sessions, lock_list, lock_show, multi_agent_session_view, plan_verification,
+    profile_project, queue_status, record_false_confidence_case, render_agent_report,
+    render_token_report, resolve_verification_mode, run_verification, run_verification_brokered,
+    run_verification_continue, show_session_context, start_broker, start_worktree_session,
+    stop_broker, token_compatibility_manifest, ReportFormat, TokenProfile, VerificationMode,
 };
 
 #[derive(Debug, Parser)]
@@ -48,6 +50,10 @@ enum Command {
         full: bool,
         #[arg(long = "continue")]
         continue_after_failure: bool,
+        #[arg(long)]
+        broker: bool,
+        #[arg(long)]
+        no_broker: bool,
         #[arg(long, value_enum, default_value_t = CliTokenProfile::Standard)]
         token_profile: CliTokenProfile,
     },
@@ -66,6 +72,14 @@ enum Command {
     Broker {
         #[command(subcommand)]
         command: BrokerCommand,
+    },
+    Queue {
+        #[command(subcommand)]
+        command: QueueCommand,
+    },
+    Lock {
+        #[command(subcommand)]
+        command: LockCommand,
     },
     Bench {
         #[arg(long)]
@@ -103,11 +117,45 @@ enum McpCommand {
 
 #[derive(Debug, Subcommand)]
 enum BrokerCommand {
+    Start {
+        #[arg(long)]
+        json: bool,
+    },
+    Stop {
+        #[arg(long)]
+        json: bool,
+    },
     Status {
         #[arg(long)]
         json: bool,
     },
     Serve,
+}
+
+#[derive(Debug, Subcommand)]
+enum QueueCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    Cancel {
+        job_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LockCommand {
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        lock_id: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,6 +204,16 @@ enum SessionCommand {
         json: bool,
     },
     List {
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        session_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    Close {
+        session_id: String,
         #[arg(long)]
         json: bool,
     },
@@ -258,8 +316,13 @@ fn main() -> Result<()> {
             dry_run,
             full,
             continue_after_failure,
+            broker,
+            no_broker,
             token_profile,
         } => {
+            if broker && no_broker {
+                anyhow::bail!("--broker and --no-broker cannot be used together");
+            }
             let profile = initialize_project(&root)?;
             let graph = build_capability_graph(&root, &profile)?;
             let change = analyze_change(&root, &profile)?;
@@ -276,8 +339,14 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            let broker_running = broker_status(&root)["broker_state"]["running"]
+                .as_bool()
+                .unwrap_or(false);
+            let use_broker = !continue_after_failure && (broker || (!no_broker && broker_running));
             let evidence = if continue_after_failure {
                 run_verification_continue(&root, &profile, &change, &plan)?
+            } else if use_broker {
+                run_verification_brokered(&root, &profile, &change, &plan)?
             } else {
                 run_verification(&root, &profile, &change, &plan)?
             };
@@ -329,12 +398,44 @@ fn main() -> Result<()> {
             }
         },
         Command::Broker { command } => match command {
+            BrokerCommand::Start { json } => {
+                let state = start_broker(&root)?;
+                if json {
+                    print_json(&state)?;
+                } else {
+                    println!("VRT broker started.");
+                    println!("Socket:");
+                    println!(
+                        "{}",
+                        state["socket_path"]
+                            .as_str()
+                            .unwrap_or(".vrt/broker/vrt.sock")
+                    );
+                    println!("Capabilities:");
+                    for cap in state["capabilities"].as_array().into_iter().flatten() {
+                        println!("- {}", cap.as_str().unwrap_or("unknown"));
+                    }
+                }
+            }
+            BrokerCommand::Stop { json } => {
+                let state = stop_broker(&root)?;
+                if json {
+                    print_json(&state)?;
+                } else {
+                    println!("VRT broker stopped.");
+                    println!("- running: {}", state["running"].as_bool().unwrap_or(false));
+                }
+            }
             BrokerCommand::Status { json } => {
                 let status = broker_status(&root);
                 if json {
                     print_json(&status)?;
                 } else {
                     println!("VRT broker:");
+                    println!(
+                        "- running: {}",
+                        status["broker_state"]["running"].as_bool().unwrap_or(false)
+                    );
                     println!(
                         "- protocol: {}",
                         status["protocol"].as_str().unwrap_or("unknown")
@@ -358,6 +459,84 @@ fn main() -> Result<()> {
             }
             BrokerCommand::Serve => {
                 serve_broker(&root)?;
+            }
+        },
+        Command::Queue { command } => match command {
+            QueueCommand::Status { json } => {
+                let status = queue_status(&root);
+                if json {
+                    print_json(&status)?;
+                } else {
+                    println!("Verification queue:");
+                    println!("- queued: {}", status["queued_jobs"].as_u64().unwrap_or(0));
+                    println!(
+                        "- running: {}",
+                        status["running_jobs"].as_u64().unwrap_or(0)
+                    );
+                    println!(
+                        "- expensive pool: {}/{}",
+                        status["runner_pool"]["expensive"]["running"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        status["runner_pool"]["expensive"]["limit"]
+                            .as_u64()
+                            .unwrap_or(1)
+                    );
+                }
+            }
+            QueueCommand::Cancel { job_id, json } => {
+                let result = cancel_queue_job(&root, &job_id)?;
+                if json {
+                    print_json(&result)?;
+                } else {
+                    println!("Queue cancel:");
+                    println!("- job_id: {}", result["job_id"].as_str().unwrap_or(&job_id));
+                    println!(
+                        "- status: {}",
+                        result["status"].as_str().unwrap_or("unknown")
+                    );
+                }
+            }
+        },
+        Command::Lock { command } => match command {
+            LockCommand::List { json } => {
+                let locks = lock_list(&root);
+                if json {
+                    print_json(&locks)?;
+                } else {
+                    println!("Locks:");
+                    if locks["locks"]
+                        .as_array()
+                        .is_none_or(|items| items.is_empty())
+                    {
+                        println!("- none");
+                    } else {
+                        for lock in locks["locks"].as_array().into_iter().flatten() {
+                            println!(
+                                "- {} kind={} mode={} status={}",
+                                lock["resource_id"].as_str().unwrap_or("unknown"),
+                                lock["kind"].as_str().unwrap_or("unknown"),
+                                lock["mode"].as_str().unwrap_or("unknown"),
+                                lock["status"].as_str().unwrap_or("unknown")
+                            );
+                        }
+                    }
+                }
+            }
+            LockCommand::Show { lock_id, json } => {
+                let lock = lock_show(&root, &lock_id)?;
+                if json {
+                    print_json(&lock)?;
+                } else {
+                    println!("Lock:");
+                    println!(
+                        "- resource_id: {}",
+                        lock["resource_id"].as_str().unwrap_or(&lock_id)
+                    );
+                    println!("- kind: {}", lock["kind"].as_str().unwrap_or("unknown"));
+                    println!("- mode: {}", lock["mode"].as_str().unwrap_or("unknown"));
+                    println!("- reason: {}", lock["reason"].as_str().unwrap_or(""));
+                }
             }
         },
         Command::Bench { json } => {
@@ -496,13 +675,30 @@ fn main() -> Result<()> {
                 }
             }
             SessionCommand::List { json } => {
+                let session_contexts = list_session_contexts(&root)?;
                 let sessions = list_worktree_sessions(&root)?;
                 if json {
-                    print_json(&sessions)?;
-                } else if sessions.is_empty() {
-                    println!("No VRT worktree sessions recorded.");
+                    print_json(&serde_json::json!({
+                        "sessions": session_contexts,
+                        "worktree_sessions": sessions,
+                    }))?;
+                } else if session_contexts.is_empty() && sessions.is_empty() {
+                    println!("No VRT sessions recorded.");
                 } else {
-                    println!("VRT worktree sessions:");
+                    println!("VRT sessions:");
+                    for session in session_contexts {
+                        println!(
+                            "- {} agent={} status={} dirty={} evidence={}",
+                            session.session_id,
+                            session.agent_kind,
+                            session.status,
+                            session.dirty_state,
+                            session.last_evidence_id.as_deref().unwrap_or("none")
+                        );
+                    }
+                    if !sessions.is_empty() {
+                        println!("\nVRT worktree sessions:");
+                    }
                     for session in sessions {
                         println!(
                             "- {} branch={} worktree={} status={}",
@@ -512,6 +708,33 @@ fn main() -> Result<()> {
                             session.status
                         );
                     }
+                }
+            }
+            SessionCommand::Show { session_id, json } => {
+                let session = show_session_context(&root, &session_id)?;
+                if json {
+                    print_json(&session)?;
+                } else {
+                    println!("VRT session:");
+                    println!("- session_id: {}", session.session_id);
+                    println!("- status: {}", session.status);
+                    println!("- agent: {}", session.agent_kind);
+                    println!("- working_dir: {}", session.working_dir);
+                    println!("- diff_hash: {}", session.diff_hash);
+                    println!(
+                        "- last_evidence: {}",
+                        session.last_evidence_id.as_deref().unwrap_or("none")
+                    );
+                }
+            }
+            SessionCommand::Close { session_id, json } => {
+                let session = close_session_context(&root, &session_id)?;
+                if json {
+                    print_json(&session)?;
+                } else {
+                    println!("Closed VRT session:");
+                    println!("- session_id: {}", session.session_id);
+                    println!("- status: {}", session.status);
                 }
             }
             SessionCommand::View { json } => {

@@ -10,12 +10,24 @@ The broker exposes the same bounded VRT operations as MCP and deliberately does 
 ## Commands
 
 ```bash
+vrt broker start
+vrt broker stop
 vrt broker status
 vrt broker status --json
 vrt broker serve
+vrt queue status --json
+vrt queue cancel <job-id> --json
+vrt lock list --json
+vrt lock show <resource-id> --json
 ```
 
-`vrt broker status --json` returns protocol metadata, the current repository root, active run lock state, latest evidence summary, session view, allowed tools, and forbidden capabilities.
+`vrt broker start --json` writes repo-local broker state to `.vrt/broker/state.json`. It records the socket path, runner-pool limits, queue counters, lock counters, and enabled broker capabilities. It is intentionally repo-local and optional; if no broker is running, direct CLI verification still works.
+
+`vrt broker status --json` returns protocol metadata, broker state, the current repository root, active run lock state, latest evidence summary, session view, allowed tools, and forbidden capabilities.
+
+`vrt queue status --json` exposes queued and running job counts plus runner-pool limits. `vrt lock list --json` exposes lock observations from the latest evidence. This gives agents a control plane for queue/lock state without giving them arbitrary shell execution.
+
+`vrt verify --broker` and JSONL `run_verification` write job state to `.vrt/broker/jobs/<job-id>.json`. The resulting evidence includes `broker_job_id`, queue wait, lock wait, resource locks, runner pool, and singleflight metadata.
 
 ## Protocol
 
@@ -54,6 +66,20 @@ Unknown operations are structured errors:
 - `escalate_verification`: compute stricter follow-up checks for residual risk.
 - `session_view`: aggregate worktree sessions, latest evidence, active locks, confidence, and false-confidence counts.
 - `shutdown`: ask a long-running broker process to exit after responding.
+
+## Queue And Locks
+
+The broker control plane distinguishes waiting from failing:
+
+- `queued` means a verification job is waiting for ordering, runner-pool capacity, a lock, or a singleflight leader.
+- `waiting_lock` means another job owns a resource such as `.next`, `prisma-client`, `port-3000`, or a browser pool.
+- `singleflight` means another identical verification can provide scoped evidence when inputs match.
+
+Agents should not bypass VRT with a direct `build`, `test`, or `prisma generate` command while VRT reports a queued job or held resource for the same scope.
+
+When a follower joins an identical in-flight verification, it receives its own evidence record. That record points to the leader via `continued_from` and `singleflight.shared_from_evidence_id`; it does not broaden the proof beyond the matching command/input scope.
+
+Brokered verification acquires exclusive lock directories under `.vrt/broker/locks` before running checks that write shared resources. Examples include `.next`, `prisma-client`, `port-3000`, and `playwright-browser`. If a lock is held, VRT waits and records `lock_wait_ms` plus per-resource `waited_ms` in the evidence. Stale or unreadable lock files are cleaned before retrying; interrupted jobs are not converted into passed evidence.
 
 ## Token-saving compatibility
 

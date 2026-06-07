@@ -9,6 +9,8 @@ VRT does not require worktrees, but it can create an isolated git worktree sessi
 vrt session start --worktree ../my-repo-agent-a
 vrt session status --json
 vrt session list --json
+vrt session show <session-id> --json
+vrt session close <session-id> --json
 vrt session view --json
 ```
 
@@ -43,6 +45,8 @@ Evidence created in that worktree still records `session_id`, `diff_hash`, `prof
 
 Use `vrt session status` inside any directory to see whether the current root is managed by VRT session metadata. If no metadata exists, VRT reports an unmanaged session and shows the current git branch when available.
 
+Every verification also updates a lightweight session registry under `.vrt/session-registry/<session-id>.json`. Registry entries track agent kind when known, repo root, working directory, worktree status, base commit, current head, diff hash, dirty state, timestamps, status, and latest evidence id. `vrt session show` reads a registry entry; `vrt session close` marks it closed without deleting evidence.
+
 ## Multi-Agent view
 
 Use `vrt session view --json` in the original repository to inspect all recorded worktree sessions at once.
@@ -56,3 +60,7 @@ The view includes:
 - check counts, failed-check counts, skipped-check counts, and confidence
 
 This is intentionally read-only. It gives agents and humans a session control plane without introducing a daemon.
+
+## Shared Working Tree Risk
+
+If multiple agents share the same working tree, source-level isolation is not guaranteed. VRT still scopes evidence by session id, diff hash, profile hash, relevant inputs hash, and environment assumptions, but agents should prefer worktree sessions for parallel edits that touch overlapping generated files, build outputs, ports, or database state.

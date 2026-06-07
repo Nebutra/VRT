@@ -252,12 +252,50 @@ pub struct EvidenceRecord {
     pub report_path: String,
     pub validity: String,
     pub stale_reasons: Vec<String>,
+    #[serde(default)]
+    pub broker_job_id: Option<String>,
+    #[serde(default)]
+    pub queue_wait_ms: u128,
+    #[serde(default)]
+    pub lock_wait_ms: u128,
+    #[serde(default)]
+    pub singleflight: SingleflightEvidence,
+    #[serde(default)]
+    pub resource_locks: Vec<ResourceLockRecord>,
+    #[serde(default = "default_runner_pool")]
+    pub runner_pool: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirtyState {
     pub is_dirty: bool,
     pub changed_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SingleflightEvidence {
+    pub role: String,
+    pub key: Option<String>,
+    pub shared_from_evidence_id: Option<String>,
+}
+
+impl Default for SingleflightEvidence {
+    fn default() -> Self {
+        Self {
+            role: "none".to_string(),
+            key: None,
+            shared_from_evidence_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLockRecord {
+    pub resource_id: String,
+    pub kind: String,
+    pub mode: String,
+    pub reason: String,
+    pub waited_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +348,34 @@ pub struct WorktreeSession {
     pub base_commit: String,
     pub status: String,
     pub instructions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionWorktreeContext {
+    pub enabled: bool,
+    pub path: Option<String>,
+    pub branch: Option<String>,
+    pub managed_by_vrt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionContext {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub session_id: String,
+    pub name: Option<String>,
+    pub agent_kind: String,
+    pub repo_root: String,
+    pub working_dir: String,
+    pub worktree: SessionWorktreeContext,
+    pub base_commit: String,
+    pub current_head: String,
+    pub diff_hash: String,
+    pub dirty_state: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub status: String,
+    pub last_evidence_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,6 +489,10 @@ struct ReleasePolicy {
 
 fn default_schema_version() -> u32 {
     VRT_SCHEMA_VERSION
+}
+
+fn default_runner_pool() -> String {
+    "cheap".to_string()
 }
 
 pub fn initialize_project(root: &Path) -> Result<ProjectProfile> {
@@ -971,7 +1041,72 @@ pub fn run_verification(
     change: &ChangeSet,
     plan: &VerificationPlan,
 ) -> Result<EvidenceRecord> {
-    run_verification_internal(root, profile, change, plan, None, vec![], vec![])
+    run_verification_internal(
+        root,
+        profile,
+        change,
+        plan,
+        VerificationRunOptions::default(),
+    )
+}
+
+pub fn run_verification_brokered(
+    root: &Path,
+    profile: &ProjectProfile,
+    change: &ChangeSet,
+    plan: &VerificationPlan,
+) -> Result<EvidenceRecord> {
+    let job_id = format!("job_{}", Uuid::new_v4().simple());
+    write_broker_job(root, &job_id, plan, "running", None)?;
+    let queue_start = Instant::now();
+    let pool_slot = match BrokerRunnerPoolSlot::acquire(root, &job_id, plan) {
+        Ok(slot) => slot,
+        Err(error) => {
+            let _ = write_broker_job_error(root, &job_id, plan, error.to_string());
+            return Err(error);
+        }
+    };
+    let queue_wait_ms = queue_start.elapsed().as_millis();
+    let lock_start = Instant::now();
+    let held_locks = match BrokerResourceLocks::acquire(root, &job_id, plan) {
+        Ok(locks) => locks,
+        Err(error) => {
+            drop(pool_slot);
+            let _ = write_broker_job_error(root, &job_id, plan, error.to_string());
+            return Err(error);
+        }
+    };
+    let lock_wait_ms = lock_start.elapsed().as_millis();
+    let evidence = run_verification_internal(
+        root,
+        profile,
+        change,
+        plan,
+        VerificationRunOptions {
+            context: RunContext {
+                broker_job_id: Some(job_id.clone()),
+                queue_wait_ms,
+                lock_wait_ms,
+            },
+            ..VerificationRunOptions::default()
+        },
+    );
+    drop(held_locks);
+    drop(pool_slot);
+    match &evidence {
+        Ok(evidence) => {
+            let status = if evidence.validity == "valid" {
+                "passed"
+            } else {
+                "failed"
+            };
+            write_broker_job(root, &job_id, plan, status, Some(evidence))?;
+        }
+        Err(error) => {
+            write_broker_job_error(root, &job_id, plan, error.to_string())?;
+        }
+    }
+    evidence
 }
 
 pub fn run_verification_continue(
@@ -1048,10 +1183,28 @@ pub fn run_verification_continue(
         profile,
         change,
         &continued_plan,
-        Some(previous.evidence_id),
-        reused_checks,
-        stale_reasons,
+        VerificationRunOptions {
+            continued_from: Some(previous.evidence_id),
+            reused_checks,
+            stale_reasons,
+            ..VerificationRunOptions::default()
+        },
     )
+}
+
+#[derive(Debug, Clone, Default)]
+struct RunContext {
+    broker_job_id: Option<String>,
+    queue_wait_ms: u128,
+    lock_wait_ms: u128,
+}
+
+#[derive(Debug, Clone, Default)]
+struct VerificationRunOptions {
+    continued_from: Option<String>,
+    reused_checks: Vec<CheckEvidence>,
+    stale_reasons: Vec<String>,
+    context: RunContext,
 }
 
 fn run_verification_internal(
@@ -1059,17 +1212,30 @@ fn run_verification_internal(
     profile: &ProjectProfile,
     change: &ChangeSet,
     plan: &VerificationPlan,
-    continued_from: Option<String>,
-    reused_checks: Vec<CheckEvidence>,
-    stale_reasons: Vec<String>,
+    options: VerificationRunOptions,
 ) -> Result<EvidenceRecord> {
+    let VerificationRunOptions {
+        continued_from,
+        reused_checks,
+        stale_reasons,
+        context: run_context,
+    } = options;
     let _lock = match VerificationRunLock::acquire_or_join(root, profile, change, plan)? {
         VerificationRunLockState::Acquired(lock) => lock,
-        VerificationRunLockState::Joined(evidence) => return Ok(*evidence),
+        VerificationRunLockState::Joined(evidence) => {
+            return write_singleflight_follower_evidence(
+                root,
+                profile,
+                change,
+                plan,
+                &evidence,
+                &run_context,
+            )
+        }
     };
     if continued_from.is_none() && reused_checks.is_empty() && stale_reasons.is_empty() {
         if let Some(evidence) = read_cached_evidence(root, profile, change, plan)? {
-            return write_cached_evidence_hit(root, profile, change, plan, &evidence);
+            return write_cached_evidence_hit(root, profile, change, plan, &evidence, &run_context);
         }
     }
     let evidence_id = format!("ev_{}", Uuid::new_v4().simple());
@@ -1168,9 +1334,16 @@ fn run_verification_internal(
         report_path: report_path.to_string_lossy().to_string(),
         validity,
         stale_reasons,
+        broker_job_id: run_context.broker_job_id,
+        queue_wait_ms: run_context.queue_wait_ms,
+        lock_wait_ms: run_context.lock_wait_ms,
+        singleflight: SingleflightEvidence::default(),
+        resource_locks: resource_locks_for_plan_with_wait(plan, run_context.lock_wait_ms),
+        runner_pool: runner_pool_for_plan(plan),
     };
     write_json(root.join(&evidence.report_path), &evidence)?;
     write_json(root.join(".vrt/latest.json"), &evidence)?;
+    register_session_context(root, change, plan, &evidence)?;
     write_evidence_cache_entry(root, profile, change, plan, &evidence)?;
     Ok(evidence)
 }
@@ -1209,6 +1382,7 @@ fn write_cached_evidence_hit(
     change: &ChangeSet,
     plan: &VerificationPlan,
     cached: &EvidenceRecord,
+    run_context: &RunContext,
 ) -> Result<EvidenceRecord> {
     let evidence_id = format!("ev_{}", Uuid::new_v4().simple());
     let raw_log_dir = PathBuf::from(".vrt").join("evidence").join(&evidence_id);
@@ -1252,9 +1426,90 @@ fn write_cached_evidence_hit(
         report_path: report_path.to_string_lossy().to_string(),
         validity: "valid".to_string(),
         stale_reasons: vec![],
+        broker_job_id: run_context.broker_job_id.clone(),
+        queue_wait_ms: run_context.queue_wait_ms,
+        lock_wait_ms: run_context.lock_wait_ms,
+        singleflight: SingleflightEvidence::default(),
+        resource_locks: resource_locks_for_plan_with_wait(plan, run_context.lock_wait_ms),
+        runner_pool: runner_pool_for_plan(plan),
     };
     write_json(root.join(&evidence.report_path), &evidence)?;
     write_json(root.join(".vrt/latest.json"), &evidence)?;
+    register_session_context(root, change, plan, &evidence)?;
+    write_evidence_cache_entry(root, profile, change, plan, &evidence)?;
+    Ok(evidence)
+}
+
+fn write_singleflight_follower_evidence(
+    root: &Path,
+    profile: &ProjectProfile,
+    change: &ChangeSet,
+    plan: &VerificationPlan,
+    leader: &EvidenceRecord,
+    run_context: &RunContext,
+) -> Result<EvidenceRecord> {
+    let evidence_id = format!("ev_{}", Uuid::new_v4().simple());
+    let raw_log_dir = PathBuf::from(".vrt").join("evidence").join(&evidence_id);
+    fs::create_dir_all(root.join(&raw_log_dir))?;
+    let started_at = Utc::now();
+    let log_path = raw_log_dir.join("singleflight-follower.raw.log");
+    fs::write(
+        root.join(&log_path),
+        format!(
+            "[vrt] joined singleflight evidence {}\n[vrt] exact match: plan_id={} diff_hash={} profile_hash={}\n",
+            leader.evidence_id, plan.plan_id, change.diff_hash, profile.profile_hash
+        ),
+    )?;
+    let mut reused_checks = leader.reused_checks.clone();
+    reused_checks.extend(leader.checks.clone());
+    for check in &mut reused_checks {
+        if check.status == "passed" {
+            check.status = "reused".to_string();
+        }
+        check.summary = format!("Shared from singleflight evidence {}", leader.evidence_id);
+    }
+    let report_path = raw_log_dir.join("evidence.json");
+    let evidence = EvidenceRecord {
+        schema_version: VRT_SCHEMA_VERSION,
+        evidence_id,
+        continued_from: Some(leader.evidence_id.clone()),
+        session_id: plan.session_id.clone(),
+        plan_id: plan.plan_id.clone(),
+        change_id: change.change_id.clone(),
+        base_commit: change.base_commit.clone(),
+        diff_hash: change.diff_hash.clone(),
+        profile_hash: profile.profile_hash.clone(),
+        lockfile_hash: lockfile_hash(root),
+        config_hash: config_hash(root),
+        toolchain_version: toolchain_version(),
+        relevant_inputs_hash: relevant_inputs_hash(root, profile, change, plan),
+        env_assumptions: env_assumptions(),
+        dirty_state: dirty_state(root),
+        started_at,
+        finished_at: Utc::now(),
+        duration_ms: 0,
+        checks: vec![],
+        reused_checks,
+        skipped: plan.skipped.clone(),
+        confidence: leader.confidence.clone(),
+        raw_log_dir: raw_log_dir.to_string_lossy().to_string(),
+        report_path: report_path.to_string_lossy().to_string(),
+        validity: leader.validity.clone(),
+        stale_reasons: vec![],
+        broker_job_id: run_context.broker_job_id.clone(),
+        queue_wait_ms: run_context.queue_wait_ms,
+        lock_wait_ms: run_context.lock_wait_ms,
+        singleflight: SingleflightEvidence {
+            role: "follower".to_string(),
+            key: Some(singleflight_key(root, profile, change, plan)?),
+            shared_from_evidence_id: Some(leader.evidence_id.clone()),
+        },
+        resource_locks: resource_locks_for_plan_with_wait(plan, run_context.lock_wait_ms),
+        runner_pool: runner_pool_for_plan(plan),
+    };
+    write_json(root.join(&evidence.report_path), &evidence)?;
+    write_json(root.join(".vrt/latest.json"), &evidence)?;
+    register_session_context(root, change, plan, &evidence)?;
     write_evidence_cache_entry(root, profile, change, plan, &evidence)?;
     Ok(evidence)
 }
@@ -1604,6 +1859,47 @@ fn wait_for_singleflight_evidence(
     }
 }
 
+fn singleflight_key(
+    root: &Path,
+    profile: &ProjectProfile,
+    change: &ChangeSet,
+    plan: &VerificationPlan,
+) -> Result<String> {
+    let commands = plan
+        .steps
+        .iter()
+        .map(|step| {
+            serde_json::json!({
+                "capability_id": step.capability_id,
+                "command": step.command,
+                "cwd": step.cwd,
+                "safety_level": step.safety_level
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "commands": commands,
+        "profile_hash": profile.profile_hash,
+        "diff_hash": change.diff_hash,
+        "base_commit": change.base_commit,
+        "lockfile_hash": lockfile_hash(root),
+        "config_hash": config_hash(root),
+        "toolchain_version": toolchain_version(),
+        "relevant_inputs_hash": relevant_inputs_hash(root, profile, change, plan),
+        "env_assumptions": env_assumptions()
+    });
+    let label = plan
+        .steps
+        .first()
+        .map(|step| sanitize(&step.capability_id))
+        .unwrap_or_else(|| "empty-plan".to_string());
+    Ok(format!(
+        "sf_{}_{}",
+        label,
+        &hash_string(&serde_json::to_string(&value)?)[..24]
+    ))
+}
+
 fn evidence_matches_plan(
     evidence: &EvidenceRecord,
     profile: &ProjectProfile,
@@ -1915,6 +2211,10 @@ vrt explain --json
 - Prefer `vrt verify --continue` after patching a failure.
 - Use raw logs only when summarized evidence is insufficient.
 - If VRT reports `.vrt/run.lock`, another verification is active for this worktree; do not start competing build/test/lint commands.
+- If VRT broker state is available, inspect `vrt broker status --json`, `vrt queue status --json`, and `vrt lock list --json` instead of bypassing VRT with competing expensive commands.
+- If VRT reports a queued job, do not treat it as failed; wait for the result or report the queue status.
+- If VRT reports a resource lock, do not manually run a command that writes to the same resource.
+- If evidence is shared or reused, preserve its scope and do not treat local shared evidence as release proof.
 
 ## Reporting
 
@@ -2084,6 +2384,37 @@ pub fn bench_summary(root: &Path) -> Result<serde_json::Value> {
         .sum::<u64>();
     let agent_tokens_saved_estimate =
         log_lines_compressed.saturating_mul(8).saturating_mul(60) / 100;
+    let queue_wait_time_ms = records
+        .iter()
+        .map(|record| u64::try_from(record.queue_wait_ms).unwrap_or(u64::MAX))
+        .sum::<u64>();
+    let lock_wait_time_ms = records
+        .iter()
+        .map(|record| u64::try_from(record.lock_wait_ms).unwrap_or(u64::MAX))
+        .sum::<u64>();
+    let singleflight_hits = records
+        .iter()
+        .filter(|record| record.singleflight.role == "follower")
+        .count();
+    let shared_evidence_count = records
+        .iter()
+        .filter(|record| record.singleflight.shared_from_evidence_id.is_some())
+        .count();
+    let singleflight_saved_time_ms = records
+        .iter()
+        .filter(|record| record.singleflight.role == "follower")
+        .map(|record| u64::try_from(record.duration_ms).unwrap_or(u64::MAX))
+        .sum::<u64>();
+    let resource_conflicts_avoided = records
+        .iter()
+        .flat_map(|record| record.resource_locks.iter())
+        .filter(|lock| lock.mode == "exclusive" && lock.waited_ms > 0)
+        .count();
+    let duplicate_commands_avoided = singleflight_hits;
+    let session_count = list_session_contexts(root)
+        .map(|sessions| sessions.len())
+        .unwrap_or(0);
+    let runner_pool_utilization = runner_pool_utilization(&records);
     Ok(serde_json::json!({
         "evidence_id": latest.evidence_id,
         "verification_time_ms": latest.duration_ms,
@@ -2099,6 +2430,15 @@ pub fn bench_summary(root: &Path) -> Result<serde_json::Value> {
         "stale_evidence_detected": stale_evidence_detected,
         "log_lines_compressed": log_lines_compressed,
         "agent_tokens_saved_estimate": agent_tokens_saved_estimate,
+        "queue_wait_time_ms": queue_wait_time_ms,
+        "lock_wait_time_ms": lock_wait_time_ms,
+        "singleflight_hits": singleflight_hits,
+        "singleflight_saved_time_ms": singleflight_saved_time_ms,
+        "resource_conflicts_avoided": resource_conflicts_avoided,
+        "duplicate_commands_avoided": duplicate_commands_avoided,
+        "runner_pool_utilization": runner_pool_utilization,
+        "session_count": session_count,
+        "shared_evidence_count": shared_evidence_count,
         "estimated_saved_time_ms": skipped_expensive_checks_ms.saturating_add(evidence_reuse_ms),
         "saved_by": {
             "skipped_expensive_checks_ms": skipped_expensive_checks_ms,
@@ -2110,6 +2450,32 @@ pub fn bench_summary(root: &Path) -> Result<serde_json::Value> {
         "confidence": latest.confidence,
         "note": "Saved time is estimated conservatively from skipped expensive checks and exact evidence reuse; skipped is not passed."
     }))
+}
+
+fn runner_pool_utilization(records: &[EvidenceRecord]) -> serde_json::Value {
+    let mut counts = BTreeMap::new();
+    for pool in ["cheap", "medium", "expensive", "exclusive"] {
+        counts.insert(pool, 0_u64);
+    }
+    for record in records {
+        if let Some(count) = counts.get_mut(record.runner_pool.as_str()) {
+            *count += 1;
+        }
+    }
+    let total = records.len() as f64;
+    let rate_for = |count: u64| {
+        if total == 0.0 {
+            0.0
+        } else {
+            count as f64 / total
+        }
+    };
+    serde_json::json!({
+        "cheap": rate_for(*counts.get("cheap").unwrap_or(&0)),
+        "medium": rate_for(*counts.get("medium").unwrap_or(&0)),
+        "expensive": rate_for(*counts.get("expensive").unwrap_or(&0)),
+        "exclusive": rate_for(*counts.get("exclusive").unwrap_or(&0))
+    })
 }
 
 fn rate(numerator: usize, denominator: usize) -> f64 {
@@ -2133,6 +2499,315 @@ fn estimated_saved_time_for_skip(skip: &SkippedCheck) -> u64 {
     } else {
         1_000
     }
+}
+
+fn runner_pool_for_plan(plan: &VerificationPlan) -> String {
+    if plan.steps.iter().any(|step| {
+        step.safety_level == "destructive"
+            || step.capability_id.contains("e2e")
+            || step.capability_id.contains("playwright")
+            || step.capability_id.contains("browser-smoke")
+    }) {
+        "exclusive".to_string()
+    } else if plan.steps.iter().any(|step| {
+        step.safety_level == "expensive"
+            || step.capability_id.contains("build")
+            || step.command.contains(" build")
+    }) {
+        "expensive".to_string()
+    } else if plan.steps.len() > 1 {
+        "medium".to_string()
+    } else {
+        "cheap".to_string()
+    }
+}
+
+fn runner_pool_limit(pool: &str) -> usize {
+    match pool {
+        "cheap" => 4,
+        "medium" => 2,
+        "expensive" => 1,
+        "exclusive" => 1,
+        _ => 1,
+    }
+}
+
+struct BrokerRunnerPoolSlot {
+    path: PathBuf,
+}
+
+impl BrokerRunnerPoolSlot {
+    fn acquire(root: &Path, job_id: &str, plan: &VerificationPlan) -> Result<Self> {
+        let pool = runner_pool_for_plan(plan);
+        let limit = runner_pool_limit(&pool);
+        let pool_dir = root.join(".vrt/broker/pools").join(&pool);
+        fs::create_dir_all(&pool_dir)?;
+        let deadline = Instant::now() + broker_lock_wait_timeout();
+        loop {
+            for slot in 0..limit {
+                let path = pool_dir.join(format!("slot-{slot}.lock"));
+                match fs::create_dir(&path) {
+                    Ok(()) => {
+                        write_json(
+                            path.join("slot.json"),
+                            &serde_json::json!({
+                                "schema_version": VRT_SCHEMA_VERSION,
+                                "pool": pool,
+                                "slot": slot,
+                                "job_id": job_id,
+                                "plan_id": plan.plan_id,
+                                "session_id": plan.session_id,
+                                "created_at": Utc::now()
+                            }),
+                        )?;
+                        return Ok(Self { path });
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        if broker_pool_slot_is_stale(&path) {
+                            let _ = fs::remove_dir_all(&path);
+                        }
+                    }
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("create broker pool slot {}", path.display()))
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("timed out waiting for runner pool {pool}");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for BrokerRunnerPoolSlot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn broker_pool_slot_is_stale(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path.join("slot.json")) else {
+        return true;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return true;
+    };
+    let Some(created_at) = value
+        .get("created_at")
+        .and_then(|value| value.as_str())
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| time.with_timezone(&Utc))
+    else {
+        return true;
+    };
+    Utc::now()
+        .signed_duration_since(created_at)
+        .to_std()
+        .map(|age| age > broker_lock_lease())
+        .unwrap_or(true)
+}
+
+fn resource_locks_for_plan(plan: &VerificationPlan) -> Vec<ResourceLockRecord> {
+    resource_locks_for_plan_with_wait(plan, 0)
+}
+
+fn resource_locks_for_plan_with_wait(
+    plan: &VerificationPlan,
+    exclusive_wait_ms: u128,
+) -> Vec<ResourceLockRecord> {
+    let mut locks = BTreeMap::new();
+    locks.insert(
+        "source-tree".to_string(),
+        ResourceLockRecord {
+            resource_id: "source-tree".to_string(),
+            kind: "filesystem".to_string(),
+            mode: "shared".to_string(),
+            reason: "Verification reads the source tree for the current diff scope.".to_string(),
+            waited_ms: 0,
+        },
+    );
+    for step in &plan.steps {
+        let id = step.capability_id.as_str();
+        let command = step.command.as_str();
+        if id.contains("build") || command.contains(" next build") || command.ends_with(" build") {
+            locks.insert(
+                ".next".to_string(),
+                ResourceLockRecord {
+                    resource_id: ".next".to_string(),
+                    kind: "filesystem".to_string(),
+                    mode: "exclusive".to_string(),
+                    reason: "Production builds write framework build output.".to_string(),
+                    waited_ms: exclusive_wait_ms,
+                },
+            );
+        }
+        if id.contains("schema-generate")
+            || id.contains("schema_generate")
+            || command.contains("prisma generate")
+        {
+            locks.insert(
+                "prisma-client".to_string(),
+                ResourceLockRecord {
+                    resource_id: "prisma-client".to_string(),
+                    kind: "generated_artifact".to_string(),
+                    mode: "exclusive".to_string(),
+                    reason: "Prisma client generation writes shared generated files.".to_string(),
+                    waited_ms: exclusive_wait_ms,
+                },
+            );
+        }
+        if id.contains("e2e") || id.contains("browser-smoke") || command.contains("playwright") {
+            locks.insert(
+                "port-3000".to_string(),
+                ResourceLockRecord {
+                    resource_id: "port-3000".to_string(),
+                    kind: "port".to_string(),
+                    mode: "exclusive".to_string(),
+                    reason: "Browser and e2e checks commonly bind the local app port.".to_string(),
+                    waited_ms: exclusive_wait_ms,
+                },
+            );
+            locks.insert(
+                "playwright-browser".to_string(),
+                ResourceLockRecord {
+                    resource_id: "playwright-browser".to_string(),
+                    kind: "browser".to_string(),
+                    mode: "exclusive".to_string(),
+                    reason: "Browser automation should be pooled to avoid local contention."
+                        .to_string(),
+                    waited_ms: exclusive_wait_ms,
+                },
+            );
+        }
+    }
+    locks.into_values().collect()
+}
+
+struct BrokerResourceLocks {
+    paths: Vec<PathBuf>,
+}
+
+impl BrokerResourceLocks {
+    fn acquire(root: &Path, job_id: &str, plan: &VerificationPlan) -> Result<Self> {
+        let mut paths = Vec::new();
+        let deadline = Instant::now() + broker_lock_wait_timeout();
+        for lock in resource_locks_for_plan(plan)
+            .into_iter()
+            .filter(|lock| lock.mode == "exclusive")
+        {
+            let path = broker_lock_path(root, &lock.resource_id);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            loop {
+                match fs::create_dir(&path) {
+                    Ok(()) => {
+                        write_json(
+                            path.join("lock.json"),
+                            &serde_json::json!({
+                                "schema_version": VRT_SCHEMA_VERSION,
+                                "resource_id": lock.resource_id,
+                                "kind": lock.kind,
+                                "mode": lock.mode,
+                                "reason": lock.reason,
+                                "job_id": job_id,
+                                "plan_id": plan.plan_id,
+                                "session_id": plan.session_id,
+                                "created_at": Utc::now()
+                            }),
+                        )?;
+                        paths.push(path);
+                        break;
+                    }
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                        if broker_lock_is_stale(&path) {
+                            let _ = fs::remove_dir_all(&path);
+                            continue;
+                        }
+                        if Instant::now() >= deadline {
+                            anyhow::bail!(
+                                "timed out waiting for resource lock {} held at {}",
+                                lock.resource_id,
+                                path.display()
+                            );
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("create broker lock {}", path.display()))
+                    }
+                }
+            }
+        }
+        Ok(Self { paths })
+    }
+}
+
+impl Drop for BrokerResourceLocks {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn broker_lock_wait_timeout() -> Duration {
+    std::env::var("VRT_BROKER_LOCK_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(30))
+}
+
+fn broker_lock_lease() -> Duration {
+    std::env::var("VRT_BROKER_LOCK_LEASE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(15 * 60))
+}
+
+fn broker_lock_is_stale(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path.join("lock.json")) else {
+        return true;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return true;
+    };
+    let Some(created_at) = value
+        .get("created_at")
+        .and_then(|value| value.as_str())
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|time| time.with_timezone(&Utc))
+    else {
+        return true;
+    };
+    Utc::now()
+        .signed_duration_since(created_at)
+        .to_std()
+        .map(|age| age > broker_lock_lease())
+        .unwrap_or(true)
+}
+
+fn broker_lock_path(root: &Path, resource_id: &str) -> PathBuf {
+    root.join(".vrt/broker/locks")
+        .join(format!("{}.lock", broker_lock_filename(resource_id)))
+}
+
+fn broker_lock_filename(resource_id: &str) -> String {
+    resource_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 pub fn record_false_confidence_case(
@@ -2337,6 +3012,124 @@ pub fn multi_agent_session_view(root: &Path) -> Result<MultiAgentSessionView> {
         root: root_path.to_string_lossy().to_string(),
         sessions,
     })
+}
+
+pub fn list_session_contexts(root: &Path) -> Result<Vec<SessionContext>> {
+    let sessions_dir = session_registry_dir(root);
+    if !sessions_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut sessions = Vec::new();
+    for entry in fs::read_dir(sessions_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "json")
+        {
+            let session: SessionContext = serde_json::from_str(&fs::read_to_string(entry.path())?)
+                .with_context(|| format!("parse {}", entry.path().display()))?;
+            sessions.push(session);
+        }
+    }
+    sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(sessions)
+}
+
+pub fn show_session_context(root: &Path, session_id: &str) -> Result<SessionContext> {
+    let path = session_context_path(root, session_id);
+    serde_json::from_str(&fs::read_to_string(&path)?)
+        .with_context(|| format!("parse {}", path.display()))
+}
+
+pub fn close_session_context(root: &Path, session_id: &str) -> Result<SessionContext> {
+    let mut session = show_session_context(root, session_id)?;
+    session.status = "closed".to_string();
+    session.last_seen_at = Utc::now();
+    write_json(session_context_path(root, session_id), &session)?;
+    Ok(session)
+}
+
+fn register_session_context(
+    root: &Path,
+    change: &ChangeSet,
+    plan: &VerificationPlan,
+    evidence: &EvidenceRecord,
+) -> Result<()> {
+    fs::create_dir_all(session_registry_dir(root))?;
+    let now = Utc::now();
+    let path = session_context_path(root, &plan.session_id);
+    let existing = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<SessionContext>(&text).ok());
+    let root_path = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let current_head = git_output(root, ["rev-parse", "HEAD"]).unwrap_or_else(|_| "unknown".into());
+    let branch = git_output(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|_| "unknown".into());
+    let worktree = session_worktree_context(root, branch.trim());
+    let status = existing
+        .as_ref()
+        .filter(|session| session.status == "closed")
+        .map(|session| session.status.clone())
+        .unwrap_or_else(|| "active".to_string());
+    let session = SessionContext {
+        schema_version: VRT_SCHEMA_VERSION,
+        session_id: plan.session_id.clone(),
+        name: existing.and_then(|session| session.name),
+        agent_kind: std::env::var("VRT_AGENT_KIND").unwrap_or_else(|_| "unknown".to_string()),
+        repo_root: root_path.to_string_lossy().to_string(),
+        working_dir: root_path.to_string_lossy().to_string(),
+        worktree,
+        base_commit: change.base_commit.clone(),
+        current_head: current_head.trim().to_string(),
+        diff_hash: change.diff_hash.clone(),
+        dirty_state: if dirty_state(root).is_dirty {
+            "dirty".to_string()
+        } else {
+            "clean".to_string()
+        },
+        created_at: show_session_context(root, &plan.session_id)
+            .map(|session| session.created_at)
+            .unwrap_or(now),
+        last_seen_at: now,
+        status,
+        last_evidence_id: Some(evidence.evidence_id.clone()),
+    };
+    write_json(path, &session)
+}
+
+fn session_worktree_context(root: &Path, branch: &str) -> SessionWorktreeContext {
+    let root_path = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if let Ok(session) = current_worktree_session(root) {
+        let worktree_path = PathBuf::from(&session.worktree_path);
+        let worktree_path = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.to_path_buf());
+        let managed_by_vrt = root.join(".vrt/session.json").exists();
+        let enabled = managed_by_vrt && worktree_path == root_path;
+        return SessionWorktreeContext {
+            enabled,
+            path: enabled.then(|| worktree_path.to_string_lossy().to_string()),
+            branch: Some(session.branch),
+            managed_by_vrt: enabled,
+        };
+    }
+    SessionWorktreeContext {
+        enabled: false,
+        path: None,
+        branch: Some(branch.to_string()),
+        managed_by_vrt: false,
+    }
+}
+
+fn session_registry_dir(root: &Path) -> PathBuf {
+    root.join(".vrt/session-registry")
+}
+
+fn session_context_path(root: &Path, session_id: &str) -> PathBuf {
+    session_registry_dir(root).join(format!("{}.json", sanitize(session_id)))
 }
 
 fn write_session_metadata(root: &Path, session: &WorktreeSession) -> Result<()> {
@@ -2908,6 +3701,7 @@ pub fn broker_status(root: &Path) -> serde_json::Value {
         "root": root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
         "pid": std::process::id(),
         "generated_at": Utc::now(),
+        "broker_state": broker_runtime_state(root),
         "active_lock": read_run_lock(root),
         "latest_evidence": latest_evidence,
         "session_view": multi_agent_session_view(root).ok(),
@@ -2925,6 +3719,258 @@ pub fn broker_status(root: &Path) -> serde_json::Value {
     })
 }
 
+pub fn start_broker(root: &Path) -> Result<serde_json::Value> {
+    fs::create_dir_all(root.join(".vrt/broker"))?;
+    let state = broker_state_value(root, true);
+    write_json(root.join(".vrt/broker/state.json"), &state)?;
+    Ok(state)
+}
+
+pub fn stop_broker(root: &Path) -> Result<serde_json::Value> {
+    fs::create_dir_all(root.join(".vrt/broker"))?;
+    let mut state = broker_state_value(root, false);
+    state["stopped_at"] = serde_json::json!(Utc::now());
+    write_json(root.join(".vrt/broker/state.json"), &state)?;
+    Ok(state)
+}
+
+pub fn queue_status(root: &Path) -> serde_json::Value {
+    let state = broker_runtime_state(root);
+    serde_json::json!({
+        "schema_version": VRT_SCHEMA_VERSION,
+        "queued_jobs": state["queue"]["queued_jobs"].as_u64().unwrap_or(0),
+        "running_jobs": state["queue"]["running_jobs"].as_u64().unwrap_or(0),
+        "cancelled_jobs": state["queue"]["cancelled_jobs"].as_u64().unwrap_or(0),
+        "waiting": [],
+        "runner_pool": state["runner_pool"].clone(),
+        "note": "Queue status is repo-local; direct verification falls back when no broker is running."
+    })
+}
+
+pub fn cancel_queue_job(root: &Path, job_id: &str) -> Result<serde_json::Value> {
+    if job_id.trim().is_empty() {
+        anyhow::bail!("job id must not be empty");
+    }
+    Ok(serde_json::json!({
+        "schema_version": VRT_SCHEMA_VERSION,
+        "job_id": job_id,
+        "status": "not_found",
+        "queue": queue_status(root),
+        "message": "No queued broker job with this id was found in the repo-local queue state."
+    }))
+}
+
+pub fn lock_list(root: &Path) -> serde_json::Value {
+    let mut locks = active_broker_locks(root);
+    let observed = read_latest_evidence(root)
+        .ok()
+        .map(|evidence| {
+            evidence
+                .resource_locks
+                .into_iter()
+                .map(|lock| {
+                    serde_json::json!({
+                        "resource_id": lock.resource_id,
+                        "kind": lock.kind,
+                        "mode": lock.mode,
+                        "reason": lock.reason,
+                        "waited_ms": lock.waited_ms,
+                        "status": "observed"
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    locks.extend(observed);
+    let held = locks.iter().filter(|lock| lock["status"] == "held").count();
+    serde_json::json!({
+        "schema_version": VRT_SCHEMA_VERSION,
+        "held": held,
+        "waiting": 0,
+        "locks": locks
+    })
+}
+
+fn active_broker_locks(root: &Path) -> Vec<serde_json::Value> {
+    let locks_dir = root.join(".vrt/broker/locks");
+    let Ok(entries) = fs::read_dir(&locks_dir) else {
+        return vec![];
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| {
+            let path = entry.path();
+            if broker_lock_is_stale(&path) {
+                let _ = fs::remove_dir_all(&path);
+                return None;
+            }
+            let value = fs::read_to_string(path.join("lock.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())?;
+            Some(serde_json::json!({
+                "resource_id": value.get("resource_id").cloned().unwrap_or_else(|| serde_json::json!("unknown")),
+                "kind": value.get("kind").cloned().unwrap_or_else(|| serde_json::json!("unknown")),
+                "mode": value.get("mode").cloned().unwrap_or_else(|| serde_json::json!("exclusive")),
+                "reason": value.get("reason").cloned().unwrap_or_else(|| serde_json::json!("broker resource lock")),
+                "waited_ms": 0,
+                "status": "held",
+                "job_id": value.get("job_id").cloned().unwrap_or(serde_json::Value::Null),
+                "created_at": value.get("created_at").cloned().unwrap_or(serde_json::Value::Null)
+            }))
+        })
+        .collect()
+}
+
+pub fn lock_show(root: &Path, lock_id: &str) -> Result<serde_json::Value> {
+    let locks = lock_list(root);
+    let Some(lock) = locks["locks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|lock| lock["resource_id"] == lock_id)
+    else {
+        anyhow::bail!("lock not found: {lock_id}");
+    };
+    Ok(lock.clone())
+}
+
+fn broker_runtime_state(root: &Path) -> serde_json::Value {
+    let path = root.join(".vrt/broker/state.json");
+    let mut state = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| broker_state_value(root, false));
+    state["runner_pool"] = runner_pool_status(root);
+    state
+}
+
+fn broker_state_value(root: &Path, running: bool) -> serde_json::Value {
+    let session_count = list_session_contexts(root)
+        .map(|sessions| sessions.len())
+        .unwrap_or(0);
+    serde_json::json!({
+        "schema_version": VRT_SCHEMA_VERSION,
+        "running": running,
+        "mode": "repo-local",
+        "root": root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+        "socket_path": root.join(".vrt/broker/vrt.sock"),
+        "started_at": Utc::now(),
+        "capabilities": [
+            "session_registry",
+            "verification_queue",
+            "resource_locks",
+            "singleflight",
+            "runner_pool",
+            "evidence_ledger"
+        ],
+        "sessions": {
+            "active": session_count
+        },
+        "queue": {
+            "queued_jobs": 0,
+            "running_jobs": 0,
+            "cancelled_jobs": 0
+        },
+        "locks": {
+            "held": 0,
+            "waiting": 0,
+            "stale": 0
+        },
+        "runner_pool": runner_pool_status(root)
+    })
+}
+
+fn runner_pool_status(root: &Path) -> serde_json::Value {
+    let mut pools = serde_json::Map::new();
+    for pool in ["cheap", "medium", "expensive", "exclusive"] {
+        pools.insert(
+            pool.to_string(),
+            serde_json::json!({
+                "limit": runner_pool_limit(pool),
+                "running": active_runner_pool_slot_count(root, pool)
+            }),
+        );
+    }
+    serde_json::Value::Object(pools)
+}
+
+fn active_runner_pool_slot_count(root: &Path, pool: &str) -> usize {
+    let pool_dir = root.join(".vrt/broker/pools").join(pool);
+    let Ok(entries) = fs::read_dir(&pool_dir) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter(|entry| {
+            let path = entry.path();
+            if broker_pool_slot_is_stale(&path) {
+                let _ = fs::remove_dir_all(&path);
+                false
+            } else {
+                true
+            }
+        })
+        .count()
+}
+
+fn write_broker_job(
+    root: &Path,
+    job_id: &str,
+    plan: &VerificationPlan,
+    status: &str,
+    evidence: Option<&EvidenceRecord>,
+) -> Result<()> {
+    let jobs_dir = root.join(".vrt/broker/jobs");
+    fs::create_dir_all(&jobs_dir)?;
+    let value = serde_json::json!({
+        "schema_version": VRT_SCHEMA_VERSION,
+        "job_id": job_id,
+        "session_id": plan.session_id,
+        "plan_id": plan.plan_id,
+        "mode": plan.mode,
+        "priority": "normal",
+        "cost": runner_pool_for_plan(plan),
+        "status": status,
+        "required_resources": resource_locks_for_plan(plan),
+        "created_at": Utc::now(),
+        "updated_at": Utc::now(),
+        "evidence_id": evidence.map(|record| record.evidence_id.clone()),
+        "queue_wait_ms": evidence.map(|record| record.queue_wait_ms).unwrap_or(0),
+        "lock_wait_ms": evidence.map(|record| record.lock_wait_ms).unwrap_or(0),
+        "singleflight": evidence.map(|record| record.singleflight.clone())
+    });
+    write_json(jobs_dir.join(format!("{job_id}.json")), &value)
+}
+
+fn write_broker_job_error(
+    root: &Path,
+    job_id: &str,
+    plan: &VerificationPlan,
+    error: String,
+) -> Result<()> {
+    let jobs_dir = root.join(".vrt/broker/jobs");
+    fs::create_dir_all(&jobs_dir)?;
+    write_json(
+        jobs_dir.join(format!("{job_id}.json")),
+        &serde_json::json!({
+            "schema_version": VRT_SCHEMA_VERSION,
+            "job_id": job_id,
+            "session_id": plan.session_id,
+            "plan_id": plan.plan_id,
+            "mode": plan.mode,
+            "priority": "normal",
+            "cost": runner_pool_for_plan(plan),
+            "status": "failed",
+            "required_resources": resource_locks_for_plan(plan),
+            "created_at": Utc::now(),
+            "updated_at": Utc::now(),
+            "error": error
+        }),
+    )
+}
+
 pub fn handle_broker_message(root: &Path, line: &str) -> Result<Option<String>> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -2940,11 +3986,14 @@ pub fn handle_broker_message(root: &Path, line: &str) -> Result<Option<String>> 
         .or_else(|| request.get("method"))
         .and_then(|value| value.as_str())
         .unwrap_or("status");
-    let arguments = request
+    let mut arguments = request
         .get("arguments")
         .or_else(|| request.get("params"))
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    if op == "run_verification" {
+        arguments["brokered"] = serde_json::json!(true);
+    }
     let result = match op {
         "status" => Ok(broker_status(root)),
         "session_view" => multi_agent_session_view(root).map(|view| {
@@ -2986,6 +4035,14 @@ fn mcp_tool_names() -> Vec<&'static str> {
         "explain_failure",
         "get_evidence",
         "escalate_verification",
+        "get_broker_status",
+        "list_sessions",
+        "show_session",
+        "list_queue",
+        "cancel_job",
+        "list_locks",
+        "start_session",
+        "close_session",
     ]
 }
 
@@ -3060,6 +4117,86 @@ fn mcp_tools() -> Vec<serde_json::Value> {
                 }
             }),
             true,
+        ),
+        mcp_tool(
+            "get_broker_status",
+            "Get Broker Status",
+            "Inspect repo-local broker state, queue summary, lock summary, sessions, and latest evidence.",
+            serde_json::json!({}),
+            true,
+        ),
+        mcp_tool(
+            "list_sessions",
+            "List Sessions",
+            "List session-aware verification contexts recorded for this repository.",
+            serde_json::json!({}),
+            true,
+        ),
+        mcp_tool(
+            "show_session",
+            "Show Session",
+            "Show one recorded session context by session id.",
+            serde_json::json!({
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id to inspect."
+                }
+            }),
+            true,
+        ),
+        mcp_tool(
+            "list_queue",
+            "List Queue",
+            "Inspect the repo-local verification queue and runner pool.",
+            serde_json::json!({}),
+            true,
+        ),
+        mcp_tool(
+            "cancel_job",
+            "Cancel Job",
+            "Cancel a queued broker job by id when present.",
+            serde_json::json!({
+                "job_id": {
+                    "type": "string",
+                    "description": "Queued job id to cancel."
+                }
+            }),
+            false,
+        ),
+        mcp_tool(
+            "list_locks",
+            "List Locks",
+            "Inspect resource lock observations for the current repository.",
+            serde_json::json!({}),
+            true,
+        ),
+        mcp_tool(
+            "start_session",
+            "Start Session",
+            "Create or inspect a session-aware verification context. Pass worktree_path to create a VRT-managed worktree.",
+            serde_json::json!({
+                "worktree_path": {
+                    "type": "string",
+                    "description": "Optional worktree path. If provided, VRT creates a managed git worktree session."
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Optional branch name for a managed worktree session."
+                }
+            }),
+            false,
+        ),
+        mcp_tool(
+            "close_session",
+            "Close Session",
+            "Mark a session context closed without deleting evidence.",
+            serde_json::json!({
+                "session_id": {
+                    "type": "string",
+                    "description": "Session id to close."
+                }
+            }),
+            false,
         ),
     ]
 }
@@ -3371,6 +4508,13 @@ fn call_mcp_tool(
             }
             let evidence = if continue_after_failure {
                 run_verification_continue(root, &profile, &change, &plan)?
+            } else if arguments
+                .get("brokered")
+                .or_else(|| arguments.get("broker"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                run_verification_brokered(root, &profile, &change, &plan)?
             } else {
                 run_verification(root, &profile, &change, &plan)?
             };
@@ -3421,8 +4565,55 @@ fn call_mcp_tool(
                 "plan": plan
             }))
         }
+        "get_broker_status" => Ok(broker_status(root)),
+        "list_sessions" => Ok(serde_json::json!({
+            "sessions": list_session_contexts(root)?,
+            "worktree_sessions": list_worktree_sessions(root)?
+        })),
+        "show_session" => {
+            let session_id = required_string(arguments, "session_id")?;
+            Ok(serde_json::json!({
+                "session": show_session_context(root, session_id)?
+            }))
+        }
+        "list_queue" => Ok(queue_status(root)),
+        "cancel_job" => {
+            let job_id = required_string(arguments, "job_id")?;
+            cancel_queue_job(root, job_id)
+        }
+        "list_locks" => Ok(lock_list(root)),
+        "start_session" => {
+            if let Some(worktree_path) = arguments
+                .get("worktree_path")
+                .and_then(|value| value.as_str())
+            {
+                let branch = arguments.get("branch").and_then(|value| value.as_str());
+                let session = start_worktree_session(root, Path::new(worktree_path), branch)?;
+                Ok(serde_json::json!({
+                    "session": session
+                }))
+            } else {
+                Ok(serde_json::json!({
+                    "session": current_worktree_session(root)?
+                }))
+            }
+        }
+        "close_session" => {
+            let session_id = required_string(arguments, "session_id")?;
+            Ok(serde_json::json!({
+                "session": close_session_context(root, session_id)?
+            }))
+        }
         other => anyhow::bail!("Unknown tool: {other}"),
     }
+}
+
+fn required_string<'a>(arguments: &'a serde_json::Value, key: &str) -> Result<&'a str> {
+    arguments
+        .get(key)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{key} is required"))
 }
 
 fn mcp_requested_mode(

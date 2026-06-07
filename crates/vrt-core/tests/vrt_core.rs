@@ -1,13 +1,17 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 use tempfile::TempDir;
 use vrt_core::{
-    analyze_change, build_capability_graph, explain_evidence, initialize_project, install_skill,
-    install_token_rules, plan_verification, record_false_confidence_case, render_agent_report,
-    render_junit, render_markdown_report, render_otel_trace, render_sarif, render_token_report,
-    resolve_verification_mode, run_verification, run_verification_continue, start_worktree_session,
+    analyze_change, build_capability_graph, close_session_context, explain_evidence,
+    initialize_project, install_skill, install_token_rules, list_session_contexts,
+    plan_verification, record_false_confidence_case, render_agent_report, render_junit,
+    render_markdown_report, render_otel_trace, render_sarif, render_token_report,
+    resolve_verification_mode, run_verification, run_verification_brokered,
+    run_verification_continue, show_session_context, start_worktree_session,
     token_compatibility_manifest, token_rules_markdown, Detection, PackageManager, ReportFormat,
     RiskTag, TokenProfile, VerificationMode,
 };
@@ -1492,6 +1496,20 @@ fn verification_records_partial_evidence_and_raw_logs_on_failure() {
         .expect("env assumptions")
         .iter()
         .any(|item| item == "local process environment captured by project-owned commands"));
+    assert!(evidence_json["broker_job_id"].is_null());
+    assert_eq!(evidence_json["queue_wait_ms"], 0);
+    assert_eq!(evidence_json["lock_wait_ms"], 0);
+    assert_eq!(evidence_json["singleflight"]["role"], "none");
+    assert!(evidence_json["singleflight"]["key"].is_null());
+    assert!(evidence_json["singleflight"]["shared_from_evidence_id"].is_null());
+    assert!(evidence_json["resource_locks"]
+        .as_array()
+        .expect("resource locks")
+        .iter()
+        .any(|lock| lock["resource_id"] == "source-tree"
+            && lock["kind"] == "filesystem"
+            && lock["mode"] == "shared"));
+    assert_eq!(evidence_json["runner_pool"], "cheap");
     assert_eq!(evidence.validity.as_str(), "partial");
     assert_eq!(evidence.checks[0].status.as_str(), "failed");
     assert_eq!(evidence_json["checks"][0]["safety_level"], "safe");
@@ -1758,6 +1776,15 @@ fn bench_reports_cache_hit_reuse_and_saved_time_breakdown() {
             .expect("token savings estimate")
             > 0
     );
+    assert_eq!(bench["queue_wait_time_ms"], 0);
+    assert_eq!(bench["lock_wait_time_ms"], 0);
+    assert_eq!(bench["singleflight_hits"], 0);
+    assert_eq!(bench["singleflight_saved_time_ms"], 0);
+    assert_eq!(bench["resource_conflicts_avoided"], 0);
+    assert_eq!(bench["duplicate_commands_avoided"], 0);
+    assert_eq!(bench["shared_evidence_count"], 0);
+    assert!(bench["runner_pool_utilization"]["cheap"].as_f64().is_some());
+    assert!(bench["session_count"].as_u64().expect("session count") >= 1);
 }
 
 #[test]
@@ -1841,9 +1868,247 @@ fn verification_joins_same_plan_singleflight_and_reuses_latest_evidence() {
     let joined = run_verification(dir.path(), &profile, &change, &plan).expect("joined run");
 
     fs::remove_dir_all(lock_dir).expect("cleanup test lock");
-    assert_eq!(joined.evidence_id, first.evidence_id);
+    assert_ne!(joined.evidence_id, first.evidence_id);
+    assert_eq!(
+        joined.continued_from.as_deref(),
+        Some(first.evidence_id.as_str())
+    );
     assert_eq!(joined.plan_id, first.plan_id);
+    assert_eq!(joined.singleflight.role, "follower");
+    assert_eq!(
+        joined.singleflight.shared_from_evidence_id.as_deref(),
+        Some(first.evidence_id.as_str())
+    );
+    assert!(joined
+        .singleflight
+        .key
+        .as_deref()
+        .is_some_and(|key| key.contains("workspace-typecheck")));
+    assert!(joined.checks.is_empty());
+    assert_eq!(joined.reused_checks.len(), first.checks.len());
     assert!(!dir.path().join("singleflight-ran").exists());
+
+    let bench = vrt_core::bench_summary(dir.path()).expect("bench");
+    assert_eq!(bench["singleflight_hits"], 1);
+    assert_eq!(bench["duplicate_commands_avoided"], 1);
+    assert_eq!(bench["shared_evidence_count"], 1);
+}
+
+#[test]
+fn brokered_verification_records_job_id_and_job_state() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Dev).expect("plan");
+    plan.steps.truncate(1);
+    plan.steps[0].command = "sh -c 'echo broker typecheck ok'".to_string();
+
+    let evidence =
+        run_verification_brokered(dir.path(), &profile, &change, &plan).expect("brokered run");
+    let broker_job_id = evidence.broker_job_id.as_deref().expect("broker job id");
+    let job_path = dir
+        .path()
+        .join(".vrt/broker/jobs")
+        .join(format!("{broker_job_id}.json"));
+    let job: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(job_path).expect("job json")).expect("parse job");
+
+    assert!(broker_job_id.starts_with("job_"));
+    assert_eq!(job["job_id"], broker_job_id);
+    assert_eq!(job["session_id"], plan.session_id);
+    assert_eq!(job["plan_id"], plan.plan_id);
+    assert_eq!(job["status"], "passed");
+    assert_eq!(job["evidence_id"], evidence.evidence_id);
+    assert!(evidence.queue_wait_ms < 1000);
+    assert_eq!(
+        job["queue_wait_ms"].as_u64().unwrap() as u128,
+        evidence.queue_wait_ms
+    );
+    assert_eq!(evidence.singleflight.role, "none");
+}
+
+#[test]
+fn brokered_verification_waits_for_exclusive_resource_lock() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Release).expect("plan");
+    plan.steps
+        .retain(|step| step.capability_id.contains("build"));
+    if plan.steps.is_empty() {
+        panic!("expected build step");
+    }
+    plan.steps[0].command = "sh -c 'echo build ok'".to_string();
+
+    let lock_dir = dir.path().join(".vrt/broker/locks/.next.lock");
+    fs::create_dir_all(&lock_dir).expect("preexisting lock");
+    fs::write(
+        lock_dir.join("lock.json"),
+        serde_json::json!({
+            "resource_id": ".next",
+            "job_id": "job_existing",
+            "created_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("lock json");
+    let releaser_path = lock_dir.clone();
+    let _releaser = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(120));
+        let _ = fs::remove_dir_all(releaser_path);
+    });
+
+    let evidence =
+        run_verification_brokered(dir.path(), &profile, &change, &plan).expect("brokered run");
+
+    assert_eq!(evidence.validity, "valid");
+    assert!(
+        evidence.lock_wait_ms >= 50,
+        "waited {}",
+        evidence.lock_wait_ms
+    );
+    assert!(evidence
+        .resource_locks
+        .iter()
+        .any(|lock| lock.resource_id == ".next"
+            && lock.mode == "exclusive"
+            && lock.waited_ms >= 50));
+    assert!(!lock_dir.exists());
+}
+
+#[test]
+fn brokered_verification_waits_for_runner_pool_slot() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Release).expect("plan");
+    plan.steps
+        .retain(|step| step.capability_id.contains("build"));
+    plan.steps[0].command = "sh -c 'echo build ok'".to_string();
+
+    let slot_dir = dir.path().join(".vrt/broker/pools/expensive/slot-0.lock");
+    fs::create_dir_all(&slot_dir).expect("preexisting pool slot");
+    fs::write(
+        slot_dir.join("slot.json"),
+        serde_json::json!({
+            "pool": "expensive",
+            "slot": 0,
+            "job_id": "job_existing",
+            "created_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("slot json");
+    let releaser_path = slot_dir.clone();
+    let _releaser = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(120));
+        let _ = fs::remove_dir_all(releaser_path);
+    });
+
+    let evidence =
+        run_verification_brokered(dir.path(), &profile, &change, &plan).expect("brokered run");
+
+    assert_eq!(evidence.validity, "valid");
+    assert!(
+        evidence.queue_wait_ms >= 50,
+        "waited {}",
+        evidence.queue_wait_ms
+    );
+    assert_eq!(evidence.runner_pool, "expensive");
+    assert!(!slot_dir.exists());
+}
+
+#[test]
+fn brokered_verification_cleans_stale_resource_lock() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Release).expect("plan");
+    plan.steps
+        .retain(|step| step.capability_id.contains("build"));
+    plan.steps[0].command = "sh -c 'echo build ok'".to_string();
+
+    let lock_dir = dir.path().join(".vrt/broker/locks/.next.lock");
+    fs::create_dir_all(&lock_dir).expect("stale lock");
+    fs::write(
+        lock_dir.join("lock.json"),
+        r#"{"resource_id":".next","job_id":"job_stale","created_at":"2020-01-01T00:00:00Z"}"#,
+    )
+    .expect("stale lock json");
+
+    let evidence =
+        run_verification_brokered(dir.path(), &profile, &change, &plan).expect("brokered run");
+
+    assert_eq!(evidence.validity, "valid");
+    assert!(
+        evidence.lock_wait_ms < 200,
+        "waited {}",
+        evidence.lock_wait_ms
+    );
+    assert!(!lock_dir.exists());
+    let locks = vrt_core::lock_list(dir.path());
+    assert_eq!(locks["held"], 0);
+}
+
+#[test]
+fn lock_list_reports_active_broker_resource_locks() {
+    let dir = fixture();
+    let lock_dir = dir.path().join(".vrt/broker/locks/.next.lock");
+    fs::create_dir_all(&lock_dir).expect("active lock");
+    fs::write(
+        lock_dir.join("lock.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "resource_id": ".next",
+            "kind": "filesystem",
+            "mode": "exclusive",
+            "reason": "Production builds write framework build output.",
+            "job_id": "job_active",
+            "created_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("active lock json");
+
+    let locks = vrt_core::lock_list(dir.path());
+
+    assert_eq!(locks["held"], 1);
+    assert_eq!(locks["locks"][0]["resource_id"], ".next");
+    assert_eq!(locks["locks"][0]["status"], "held");
+    assert_eq!(locks["locks"][0]["job_id"], "job_active");
+}
+
+#[test]
+fn queue_status_reports_active_runner_pool_slots() {
+    let dir = fixture();
+    let slot_dir = dir.path().join(".vrt/broker/pools/expensive/slot-0.lock");
+    fs::create_dir_all(&slot_dir).expect("active pool slot");
+    fs::write(
+        slot_dir.join("slot.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "pool": "expensive",
+            "slot": 0,
+            "job_id": "job_active",
+            "created_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("active slot json");
+
+    let queue = vrt_core::queue_status(dir.path());
+
+    assert_eq!(queue["runner_pool"]["expensive"]["limit"], 1);
+    assert_eq!(queue["runner_pool"]["expensive"]["running"], 1);
+    assert_eq!(queue["runner_pool"]["cheap"]["running"], 0);
 }
 
 #[test]
@@ -1917,6 +2182,50 @@ fn multi_agent_session_view_summarizes_worktree_evidence() {
     assert!(latest.checks_skipped >= 1);
     assert_eq!(latest.confidence.release, "insufficient");
     assert!(view.sessions[0].active_lock.is_none());
+}
+
+#[test]
+fn verify_registers_v02_ephemeral_session_context_and_close_marks_it_closed() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Dev).expect("plan");
+    plan.session_id = "session_v02_ephemeral".to_string();
+    plan.steps.truncate(1);
+    plan.steps[0].command = "sh -c 'echo typecheck ok'".to_string();
+
+    let evidence = run_verification(dir.path(), &profile, &change, &plan).expect("run");
+    let sessions = list_session_contexts(dir.path()).expect("list sessions");
+    let session = show_session_context(dir.path(), &plan.session_id).expect("show session");
+
+    assert!(sessions
+        .iter()
+        .any(|session| session.session_id == plan.session_id));
+    assert_eq!(session.schema_version, 1);
+    assert_eq!(session.session_id, plan.session_id);
+    assert_eq!(session.agent_kind, "unknown");
+    assert_eq!(
+        session.repo_root,
+        dir.path().canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(session.working_dir, session.repo_root);
+    assert!(!session.worktree.enabled);
+    assert!(!session.worktree.managed_by_vrt);
+    assert_eq!(session.base_commit, change.base_commit);
+    assert_eq!(session.diff_hash, change.diff_hash);
+    assert_eq!(session.dirty_state, "dirty");
+    assert_eq!(session.status, "active");
+    assert_eq!(
+        session.last_evidence_id.as_deref(),
+        Some(evidence.evidence_id.as_str())
+    );
+
+    let closed = close_session_context(dir.path(), &plan.session_id).expect("close session");
+    assert_eq!(closed.status, "closed");
+    let shown = show_session_context(dir.path(), &plan.session_id).expect("show closed session");
+    assert_eq!(shown.status, "closed");
 }
 
 #[test]

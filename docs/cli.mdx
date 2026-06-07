@@ -16,6 +16,8 @@ vrt verify --mode merge
 vrt verify --mode release
 vrt verify --full
 vrt verify --continue
+vrt verify --broker
+vrt verify --no-broker
 vrt verify --token-profile rtk
 vrt verify --token-profile headroom
 vrt explain
@@ -25,7 +27,10 @@ vrt bench
 vrt session start --worktree ../my-repo-agent-a
 vrt session status --json
 vrt session list --json
+vrt session show <session-id> --json
+vrt session close <session-id> --json
 vrt session view --json
+vrt broker start --json
 vrt report --format markdown --output .vrt/reports/vrt.md
 vrt report --format sarif --output .vrt/reports/vrt.sarif
 vrt report --format junit --output .vrt/reports/vrt.junit.xml
@@ -37,6 +42,8 @@ vrt false-confidence record --stricter-check "vrt verify --mode release --full" 
 vrt false-confidence list
 vrt mcp serve
 vrt broker status --json
+vrt queue status --json
+vrt lock list --json
 vrt broker serve
 ```
 
@@ -83,6 +90,8 @@ VRT refuses destructive verification commands such as `rm -rf`, `git reset --har
 
 On failure, the command exits non-zero after flushing the JSON report to stdout so agents can parse the result from command failures. Package-manager wrapper noise is sorted behind structured TypeScript and test diagnostics.
 
+`vrt verify --broker` routes the run through the repo-local broker control plane and writes `.vrt/broker/jobs/<job-id>.json`. The nested evidence includes `broker_job_id`. When broker state is running, plain `vrt verify` uses the brokered path unless `--no-broker` is passed.
+
 ## Continue after failure
 
 `vrt verify --continue` links new evidence to `.vrt/latest.json`. It reuses prior passed checks only when the previous evidence is partial and the base commit, profile hash, and diff hash still match. If the diff changed after a patch, VRT does not reuse old checks and records stale reasons instead.
@@ -108,8 +117,21 @@ Repeated `vrt verify` requests can reuse a valid exact-match evidence cache entr
 - `saved_by.skipped_expensive_checks_ms`
 - `saved_by.evidence_reuse_ms`
 - `false_confidence_cases` and `false_confidence_rate`
+- `queue_wait_time_ms` and `lock_wait_time_ms`
+- `singleflight_hits`, `duplicate_commands_avoided`, and `shared_evidence_count`
+- `resource_conflicts_avoided`
+- `runner_pool_utilization`
+- `session_count`
 
 The saved-time, CI shift-left, and token-saving fields are conservative estimates from skipped expensive checks, local failures found before broader checks, exact evidence reuse, and raw log line counts. They do not turn skipped checks into passed checks.
+
+## Broker Control Plane
+
+`vrt broker start --json` writes repo-local broker state under `.vrt/broker/state.json`. It keeps the CLI-first path intact: direct verification still works when no broker is running, and `vrt broker serve` remains the compact JSONL protocol for agent runtimes.
+
+`vrt queue status --json` exposes queued/running job counts and runner-pool limits. `vrt lock list --json` exposes resource-lock observations from the latest evidence, including filesystem, generated artifact, port, browser, and other resource scopes when a plan requires them.
+
+Queued does not mean failed, and an observed lock does not grant permission to bypass VRT. Agents should wait, inspect status, or report the wait reason.
 
 ## Failure explanation
 

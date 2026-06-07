@@ -105,6 +105,56 @@ fn verify_dry_run_json_returns_plan_without_writing_evidence() {
 }
 
 #[test]
+fn verify_broker_json_records_broker_job_evidence() {
+    let dir = fixture();
+    fs::remove_file(dir.path().join("pnpm-lock.yaml")).expect("remove pnpm lock");
+    fs::write(dir.path().join("package-lock.json"), "{}\n").expect("npm lock");
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{
+  "scripts": {
+    "typecheck": "echo typecheck ok",
+    "build": "echo build ok"
+  },
+  "devDependencies": {
+    "typescript": "5.9.0"
+  }
+}"#,
+    )
+    .expect("package json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "verify",
+            "--broker",
+            "--json",
+        ])
+        .output()
+        .expect("vrt verify broker");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("broker verify json");
+    let broker_job_id = value["evidence"]["broker_job_id"]
+        .as_str()
+        .expect("broker job id");
+    assert!(broker_job_id.starts_with("job_"));
+    assert_eq!(value["evidence"]["singleflight"]["role"], "none");
+    assert!(dir
+        .path()
+        .join(".vrt/broker/jobs")
+        .join(format!("{broker_job_id}.json"))
+        .exists());
+}
+
+#[test]
 fn token_manifest_json_reports_rtk_and_headroom_contracts() {
     let dir = fixture();
     let output = Command::new(env!("CARGO_BIN_EXE_vrt"))
@@ -133,4 +183,186 @@ fn token_manifest_json_reports_rtk_and_headroom_contracts() {
         .unwrap()
         .iter()
         .any(|item| item == ".vrt/evidence"));
+}
+
+#[test]
+fn session_show_and_close_manage_session_registry_entries() {
+    let dir = fixture();
+    let registry = dir.path().join(".vrt/session-registry");
+    fs::create_dir_all(&registry).expect("session registry");
+    fs::write(
+        registry.join("session_cli.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "session_id": "session_cli",
+            "name": null,
+            "agent_kind": "codex",
+            "repo_root": dir.path().canonicalize().unwrap().display().to_string(),
+            "working_dir": dir.path().canonicalize().unwrap().display().to_string(),
+            "worktree": {
+                "enabled": false,
+                "path": null,
+                "branch": "main",
+                "managed_by_vrt": false
+            },
+            "base_commit": "abc123",
+            "current_head": "abc123",
+            "diff_hash": "def456",
+            "dirty_state": "dirty",
+            "created_at": "2026-06-07T00:00:00Z",
+            "last_seen_at": "2026-06-07T00:00:00Z",
+            "status": "active",
+            "last_evidence_id": "ev_cli"
+        })
+        .to_string(),
+    )
+    .expect("write session");
+
+    let show = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "session",
+            "show",
+            "session_cli",
+            "--json",
+        ])
+        .output()
+        .expect("session show");
+
+    assert!(
+        show.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let shown: serde_json::Value = serde_json::from_slice(&show.stdout).expect("show json");
+    assert_eq!(shown["session_id"], "session_cli");
+    assert_eq!(shown["status"], "active");
+
+    let close = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "session",
+            "close",
+            "session_cli",
+            "--json",
+        ])
+        .output()
+        .expect("session close");
+
+    assert!(
+        close.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&close.stderr)
+    );
+    let closed: serde_json::Value = serde_json::from_slice(&close.stdout).expect("close json");
+    assert_eq!(closed["session_id"], "session_cli");
+    assert_eq!(closed["status"], "closed");
+}
+
+#[test]
+fn broker_start_status_and_stop_manage_repo_local_state() {
+    let dir = fixture();
+    let start = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "broker",
+            "start",
+            "--json",
+        ])
+        .output()
+        .expect("broker start");
+
+    assert!(
+        start.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let started: serde_json::Value = serde_json::from_slice(&start.stdout).expect("start json");
+    assert_eq!(started["running"], true);
+    assert!(started["socket_path"]
+        .as_str()
+        .expect("socket path")
+        .ends_with(".vrt/broker/vrt.sock"));
+    assert_eq!(started["runner_pool"]["cheap"]["limit"], 4);
+    assert_eq!(started["queue"]["queued_jobs"], 0);
+    assert!(dir.path().join(".vrt/broker/state.json").exists());
+
+    let status = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "broker",
+            "status",
+            "--json",
+        ])
+        .output()
+        .expect("broker status");
+    assert!(status.status.success());
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("status json");
+    assert_eq!(status_json["broker_state"]["running"], true);
+    assert_eq!(status_json["broker_state"]["locks"]["held"], 0);
+
+    let stop = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "broker",
+            "stop",
+            "--json",
+        ])
+        .output()
+        .expect("broker stop");
+    assert!(stop.status.success());
+    let stopped: serde_json::Value = serde_json::from_slice(&stop.stdout).expect("stop json");
+    assert_eq!(stopped["running"], false);
+}
+
+#[test]
+fn queue_status_and_lock_list_expose_broker_control_plane() {
+    let dir = fixture();
+    let queue = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "queue",
+            "status",
+            "--json",
+        ])
+        .output()
+        .expect("queue status");
+    assert!(
+        queue.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&queue.stderr)
+    );
+    let queue_json: serde_json::Value = serde_json::from_slice(&queue.stdout).expect("queue json");
+    assert_eq!(queue_json["queued_jobs"], 0);
+    assert_eq!(queue_json["running_jobs"], 0);
+    assert_eq!(queue_json["runner_pool"]["expensive"]["limit"], 1);
+
+    let locks = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "lock",
+            "list",
+            "--json",
+        ])
+        .output()
+        .expect("lock list");
+    assert!(
+        locks.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&locks.stderr)
+    );
+    let locks_json: serde_json::Value = serde_json::from_slice(&locks.stdout).expect("locks json");
+    assert_eq!(locks_json["held"], 0);
+    assert!(locks_json["locks"]
+        .as_array()
+        .expect("locks array")
+        .is_empty());
 }
