@@ -366,3 +366,99 @@ fn queue_status_and_lock_list_expose_broker_control_plane() {
         .expect("locks array")
         .is_empty());
 }
+
+#[test]
+fn queue_cancel_marks_queued_job_cancelled() {
+    let dir = fixture();
+    let jobs_dir = dir.path().join(".vrt/broker/jobs");
+    fs::create_dir_all(&jobs_dir).expect("jobs dir");
+    let job_path = jobs_dir.join("job_cli_cancel.json");
+    fs::write(
+        &job_path,
+        serde_json::json!({
+            "schema_version": 1,
+            "job_id": "job_cli_cancel",
+            "session_id": "session_cli",
+            "plan_id": "plan_cli",
+            "status": "queued",
+            "cost": "medium",
+            "created_at": "2026-06-08T00:00:00Z",
+            "updated_at": "2026-06-08T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("job json");
+
+    let cancel = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "queue",
+            "cancel",
+            "job_cli_cancel",
+            "--json",
+        ])
+        .output()
+        .expect("queue cancel");
+
+    assert!(
+        cancel.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&cancel.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&cancel.stdout).expect("cancel json");
+    let updated: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(job_path).expect("updated job"))
+            .expect("updated job json");
+    assert_eq!(result["status"], "cancelled");
+    assert_eq!(result["queue"]["cancelled_jobs"], 1);
+    assert_eq!(updated["status"], "cancelled");
+}
+
+#[test]
+fn bench_concurrency_json_includes_broker_control_plane() {
+    let dir = fixture();
+    let jobs_dir = dir.path().join(".vrt/broker/jobs");
+    fs::create_dir_all(&jobs_dir).expect("jobs dir");
+    fs::write(
+        jobs_dir.join("job_cli_waiting.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "job_id": "job_cli_waiting",
+            "session_id": "session_cli",
+            "plan_id": "plan_cli",
+            "status": "queued",
+            "cost": "medium",
+            "created_at": "2026-06-08T00:00:00Z",
+            "updated_at": "2026-06-08T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("job json");
+
+    let bench = Command::new(env!("CARGO_BIN_EXE_vrt"))
+        .args([
+            "--root",
+            dir.path().to_str().unwrap(),
+            "bench",
+            "--concurrency",
+            "--json",
+        ])
+        .output()
+        .expect("bench concurrency");
+
+    assert!(
+        bench.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&bench.stderr)
+    );
+    let result: serde_json::Value =
+        serde_json::from_slice(&bench.stdout).expect("bench concurrency json");
+    assert_eq!(result["concurrency"]["queue"]["queued_jobs"], 1);
+    assert_eq!(
+        result["concurrency"]["queue"]["waiting"][0]["job_id"],
+        "job_cli_waiting"
+    );
+    assert!(result["concurrency"]["locks"]["locks"].is_array());
+    assert!(result["concurrency"]["broker"]["broker_state"]["running"].is_boolean());
+}

@@ -24,6 +24,7 @@ vrt explain
 vrt explain --json
 vrt skill install
 vrt bench
+vrt bench --concurrency --json
 vrt session start --worktree ../my-repo-agent-a
 vrt session status --json
 vrt session list --json
@@ -43,6 +44,7 @@ vrt false-confidence list
 vrt mcp serve
 vrt broker status --json
 vrt queue status --json
+vrt queue cancel <job-id> --json
 vrt lock list --json
 vrt broker serve
 ```
@@ -102,7 +104,7 @@ Repeated `vrt verify` requests can reuse a valid exact-match evidence cache entr
 
 ## Bench
 
-`vrt bench --json` reads the evidence ledger and reports conservative time-savings and quality metrics:
+`vrt bench --json` reads the evidence ledger and reports conservative time-savings and quality metrics. `vrt bench --concurrency --json` adds a `concurrency` object with the current queue, lock, and broker status for multi-Agent diagnosis.
 
 - `full_builds_avoided`
 - `cache_hits` and `cache_hit_rate`
@@ -129,7 +131,7 @@ The saved-time, CI shift-left, and token-saving fields are conservative estimate
 
 `vrt broker start --json` writes repo-local broker state under `.vrt/broker/state.json`. It keeps the CLI-first path intact: direct verification still works when no broker is running, and `vrt broker serve` remains the compact JSONL protocol for agent runtimes.
 
-`vrt queue status --json` exposes queued/running job counts and runner-pool limits. `vrt lock list --json` exposes resource-lock observations from the latest evidence, including filesystem, generated artifact, port, browser, and other resource scopes when a plan requires them.
+`vrt queue status --json` reads `.vrt/broker/jobs/*.json` and exposes queued/running/cancelled job counts, waiting jobs, running jobs, and runner-pool limits. `vrt queue cancel <job-id> --json` marks a still-queued job as cancelled in that repo-local ledger; running or completed jobs are reported as not cancellable. `vrt lock list --json` exposes active resource locks plus lock observations from latest evidence, including filesystem, generated artifact, port, browser, and other resource scopes when a plan requires them.
 
 Queued does not mean failed, and an observed lock does not grant permission to bypass VRT. Agents should wait, inspect status, or report the wait reason.
 
@@ -182,6 +184,6 @@ Use `vrt session status --json` to inspect the current root, `vrt session list -
 
 `vrt broker serve` starts a local JSONL stdio broker for agents that need bounded VRT operations without the full MCP JSON-RPC envelope.
 
-Supported operations are `status`, `analyze_change`, `plan_verification`, `run_verification`, `explain_failure`, `get_evidence`, `escalate_verification`, `session_view`, and `shutdown`.
+Supported operations are `status`, `analyze_change`, `plan_verification`, `run_verification`, `explain_failure`, `get_evidence`, `escalate_verification`, `get_broker_status`, `list_sessions`, `show_session`, `list_queue`, `cancel_job`, `list_locks`, `start_session`, `close_session`, `session_view`, and `shutdown`.
 
 `vrt broker status --json` reports the active run lock, latest evidence summary, session view, allowed tools, and forbidden capabilities. The broker deliberately does not expose `run_any_shell_command`; verification execution still goes through VRT plans and project-owned capabilities.

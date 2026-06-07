@@ -84,6 +84,8 @@ enum Command {
     Bench {
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        concurrency: bool,
     },
     Report {
         #[arg(long, value_enum)]
@@ -539,8 +541,15 @@ fn main() -> Result<()> {
                 }
             }
         },
-        Command::Bench { json } => {
-            let summary = bench_summary(&root)?;
+        Command::Bench { json, concurrency } => {
+            let mut summary = bench_summary(&root)?;
+            if concurrency {
+                summary["concurrency"] = serde_json::json!({
+                    "queue": queue_status(&root),
+                    "locks": lock_list(&root),
+                    "broker": broker_status(&root)
+                });
+            }
             if json {
                 print_json(&summary)?;
             } else {

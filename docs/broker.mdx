@@ -25,7 +25,7 @@ vrt lock show <resource-id> --json
 
 `vrt broker status --json` returns protocol metadata, broker state, the current repository root, active run lock state, latest evidence summary, session view, allowed tools, and forbidden capabilities.
 
-`vrt queue status --json` exposes queued and running job counts plus runner-pool limits. `vrt lock list --json` exposes lock observations from the latest evidence. This gives agents a control plane for queue/lock state without giving them arbitrary shell execution.
+`vrt queue status --json` reads `.vrt/broker/jobs/*.json` to expose queued, running, and cancelled job counts, waiting jobs, running jobs, and runner-pool limits. `vrt queue cancel <job-id> --json` marks a still-queued job as cancelled in that repo-local ledger. `vrt lock list --json` exposes active broker locks plus lock observations from latest evidence. This gives agents a control plane for queue/lock state without giving them arbitrary shell execution.
 
 `vrt verify --broker` and JSONL `run_verification` write job state to `.vrt/broker/jobs/<job-id>.json`. The resulting evidence includes `broker_job_id`, queue wait, lock wait, resource locks, runner pool, and singleflight metadata.
 
@@ -64,6 +64,14 @@ Unknown operations are structured errors:
 - `explain_failure`: summarize the latest failed evidence, or pass `evidence_id` to target a specific record.
 - `get_evidence`: return the latest evidence, or pass `evidence_id` to target a specific record.
 - `escalate_verification`: compute stricter follow-up checks for residual risk.
+- `get_broker_status`: return broker state, queue summary, lock summary, sessions, and latest evidence.
+- `list_sessions`: list session registry and worktree sessions.
+- `show_session`: show one session registry entry by `session_id`.
+- `list_queue`: inspect queued/running/cancelled broker jobs and runner-pool state.
+- `cancel_job`: mark a still-queued broker job cancelled by `job_id`.
+- `list_locks`: inspect active and observed resource locks.
+- `start_session`: inspect the current session or create a managed worktree session with `worktree_path`.
+- `close_session`: mark a session registry entry closed by `session_id`.
 - `session_view`: aggregate worktree sessions, latest evidence, active locks, confidence, and false-confidence counts.
 - `shutdown`: ask a long-running broker process to exit after responding.
 
@@ -74,6 +82,7 @@ The broker control plane distinguishes waiting from failing:
 - `queued` means a verification job is waiting for ordering, runner-pool capacity, a lock, or a singleflight leader.
 - `waiting_lock` means another job owns a resource such as `.next`, `prisma-client`, `port-3000`, or a browser pool.
 - `singleflight` means another identical verification can provide scoped evidence when inputs match.
+- `cancelled` means the job was still queued when `vrt queue cancel <job-id>` marked it cancelled; running or completed jobs are not retroactively cancelled.
 
 Agents should not bypass VRT with a direct `build`, `test`, or `prisma generate` command while VRT reports a queued job or held resource for the same scope.
 

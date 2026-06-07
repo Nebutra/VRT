@@ -1057,7 +1057,7 @@ pub fn run_verification_brokered(
     plan: &VerificationPlan,
 ) -> Result<EvidenceRecord> {
     let job_id = format!("job_{}", Uuid::new_v4().simple());
-    write_broker_job(root, &job_id, plan, "running", None)?;
+    write_broker_job(root, &job_id, plan, "queued", None)?;
     let queue_start = Instant::now();
     let pool_slot = match BrokerRunnerPoolSlot::acquire(root, &job_id, plan) {
         Ok(slot) => slot,
@@ -1067,6 +1067,7 @@ pub fn run_verification_brokered(
         }
     };
     let queue_wait_ms = queue_start.elapsed().as_millis();
+    write_broker_job(root, &job_id, plan, "running", None)?;
     let lock_start = Instant::now();
     let held_locks = match BrokerResourceLocks::acquire(root, &job_id, plan) {
         Ok(locks) => locks,
@@ -2323,8 +2324,14 @@ fn install_agent_doc(path: PathBuf) -> Result<()> {
 }
 
 pub fn bench_summary(root: &Path) -> Result<serde_json::Value> {
-    let latest: EvidenceRecord =
-        serde_json::from_str(&fs::read_to_string(root.join(".vrt/latest.json"))?)?;
+    let latest_path = root.join(".vrt/latest.json");
+    let latest: EvidenceRecord = match fs::read_to_string(&latest_path) {
+        Ok(text) => serde_json::from_str(&text)?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(empty_bench_summary(root));
+        }
+        Err(error) => return Err(error).with_context(|| format!("read {}", latest_path.display())),
+    };
     let records = read_all_evidence_records(root)?;
     let skipped_builds = latest
         .skipped
@@ -2450,6 +2457,50 @@ pub fn bench_summary(root: &Path) -> Result<serde_json::Value> {
         "confidence": latest.confidence,
         "note": "Saved time is estimated conservatively from skipped expensive checks and exact evidence reuse; skipped is not passed."
     }))
+}
+
+fn empty_bench_summary(root: &Path) -> serde_json::Value {
+    let false_confidence_cases = list_false_confidence_cases(root)
+        .map(|cases| cases.len())
+        .unwrap_or(0);
+    let session_count = list_session_contexts(root)
+        .map(|sessions| sessions.len())
+        .unwrap_or(0);
+    serde_json::json!({
+        "evidence_id": serde_json::Value::Null,
+        "verification_time_ms": 0,
+        "full_builds_avoided": 0,
+        "evidence_records": 0,
+        "cache_hits": 0,
+        "cache_hit_rate": 0.0,
+        "evidence_reuse_rate": 0.0,
+        "reused_checks": 0,
+        "reruns_avoided": 0,
+        "early_failures": 0,
+        "ci_failures_shifted_left": 0,
+        "stale_evidence_detected": 0,
+        "log_lines_compressed": 0,
+        "agent_tokens_saved_estimate": 0,
+        "queue_wait_time_ms": 0,
+        "lock_wait_time_ms": 0,
+        "singleflight_hits": 0,
+        "singleflight_saved_time_ms": 0,
+        "resource_conflicts_avoided": 0,
+        "duplicate_commands_avoided": 0,
+        "runner_pool_utilization": runner_pool_utilization(&[]),
+        "session_count": session_count,
+        "shared_evidence_count": 0,
+        "estimated_saved_time_ms": 0,
+        "saved_by": {
+            "skipped_expensive_checks_ms": 0,
+            "evidence_reuse_ms": 0,
+            "early_failure_ms": 0
+        },
+        "false_confidence_cases": false_confidence_cases,
+        "false_confidence_rate": 0.0,
+        "confidence": serde_json::json!({}),
+        "note": "No VRT evidence has been recorded yet."
+    })
 }
 
 fn runner_pool_utilization(records: &[EvidenceRecord]) -> serde_json::Value {
@@ -3736,12 +3787,36 @@ pub fn stop_broker(root: &Path) -> Result<serde_json::Value> {
 
 pub fn queue_status(root: &Path) -> serde_json::Value {
     let state = broker_runtime_state(root);
+    let jobs = broker_job_entries(root);
+    let queued_jobs = jobs
+        .iter()
+        .filter(|(_, job)| job_status(job) == Some("queued"))
+        .count() as u64;
+    let running_jobs = jobs
+        .iter()
+        .filter(|(_, job)| job_status(job) == Some("running"))
+        .count() as u64;
+    let cancelled_jobs = jobs
+        .iter()
+        .filter(|(_, job)| job_status(job) == Some("cancelled"))
+        .count() as u64;
+    let waiting = jobs
+        .iter()
+        .filter(|(_, job)| job_status(job) == Some("queued"))
+        .map(|(_, job)| broker_queue_item(job))
+        .collect::<Vec<_>>();
+    let running = jobs
+        .iter()
+        .filter(|(_, job)| job_status(job) == Some("running"))
+        .map(|(_, job)| broker_queue_item(job))
+        .collect::<Vec<_>>();
     serde_json::json!({
         "schema_version": VRT_SCHEMA_VERSION,
-        "queued_jobs": state["queue"]["queued_jobs"].as_u64().unwrap_or(0),
-        "running_jobs": state["queue"]["running_jobs"].as_u64().unwrap_or(0),
-        "cancelled_jobs": state["queue"]["cancelled_jobs"].as_u64().unwrap_or(0),
-        "waiting": [],
+        "queued_jobs": if jobs.is_empty() { state["queue"]["queued_jobs"].as_u64().unwrap_or(0) } else { queued_jobs },
+        "running_jobs": if jobs.is_empty() { state["queue"]["running_jobs"].as_u64().unwrap_or(0) } else { running_jobs },
+        "cancelled_jobs": if jobs.is_empty() { state["queue"]["cancelled_jobs"].as_u64().unwrap_or(0) } else { cancelled_jobs },
+        "waiting": waiting,
+        "running": running,
         "runner_pool": state["runner_pool"].clone(),
         "note": "Queue status is repo-local; direct verification falls back when no broker is running."
     })
@@ -3751,6 +3826,32 @@ pub fn cancel_queue_job(root: &Path, job_id: &str) -> Result<serde_json::Value> 
     if job_id.trim().is_empty() {
         anyhow::bail!("job id must not be empty");
     }
+    for (path, mut job) in broker_job_entries(root) {
+        if job["job_id"] != job_id {
+            continue;
+        }
+        let status = job_status(&job).unwrap_or("unknown");
+        if status != "queued" {
+            return Ok(serde_json::json!({
+                "schema_version": VRT_SCHEMA_VERSION,
+                "job_id": job_id,
+                "status": "not_cancelled",
+                "job_status": status,
+                "queue": queue_status(root),
+                "message": "Only queued broker jobs can be cancelled."
+            }));
+        }
+        job["status"] = serde_json::json!("cancelled");
+        job["cancelled_at"] = serde_json::json!(Utc::now());
+        job["updated_at"] = serde_json::json!(Utc::now());
+        write_json(path, &job)?;
+        return Ok(serde_json::json!({
+            "schema_version": VRT_SCHEMA_VERSION,
+            "job_id": job_id,
+            "status": "cancelled",
+            "queue": queue_status(root)
+        }));
+    }
     Ok(serde_json::json!({
         "schema_version": VRT_SCHEMA_VERSION,
         "job_id": job_id,
@@ -3758,6 +3859,71 @@ pub fn cancel_queue_job(root: &Path, job_id: &str) -> Result<serde_json::Value> 
         "queue": queue_status(root),
         "message": "No queued broker job with this id was found in the repo-local queue state."
     }))
+}
+
+fn broker_job_entries(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+    let jobs_dir = root.join(".vrt/broker/jobs");
+    let Ok(entries) = fs::read_dir(&jobs_dir) else {
+        return vec![];
+    };
+    let mut jobs = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter_map(|entry| {
+            let path = entry.path();
+            let job = fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())?;
+            Some((path, job))
+        })
+        .collect::<Vec<_>>();
+    jobs.sort_by(|(_, left), (_, right)| {
+        let left_key = format!(
+            "{}:{}",
+            left.get("created_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+            left.get("job_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+        );
+        let right_key = format!(
+            "{}:{}",
+            right
+                .get("created_at")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+            right
+                .get("job_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+        );
+        left_key.cmp(&right_key)
+    });
+    jobs
+}
+
+fn job_status(job: &serde_json::Value) -> Option<&str> {
+    job.get("status").and_then(|value| value.as_str())
+}
+
+fn broker_queue_item(job: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": job.get("job_id").cloned().unwrap_or(serde_json::Value::Null),
+        "session_id": job.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
+        "plan_id": job.get("plan_id").cloned().unwrap_or(serde_json::Value::Null),
+        "status": job.get("status").cloned().unwrap_or(serde_json::Value::Null),
+        "cost": job.get("cost").cloned().unwrap_or(serde_json::Value::Null),
+        "required_resources": job.get("required_resources").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "created_at": job.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
+        "updated_at": job.get("updated_at").cloned().unwrap_or(serde_json::Value::Null)
+    })
 }
 
 pub fn lock_list(root: &Path) -> serde_json::Value {
@@ -4006,7 +4172,15 @@ pub fn handle_broker_message(root: &Path, line: &str) -> Result<Option<String>> 
         | "run_verification"
         | "explain_failure"
         | "get_evidence"
-        | "escalate_verification" => call_mcp_tool(root, op, &arguments),
+        | "escalate_verification"
+        | "get_broker_status"
+        | "list_sessions"
+        | "show_session"
+        | "list_queue"
+        | "cancel_job"
+        | "list_locks"
+        | "start_session"
+        | "close_session" => call_mcp_tool(root, op, &arguments),
         "shutdown" => Ok(serde_json::json!({
             "shutdown": true
         })),

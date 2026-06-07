@@ -149,6 +149,59 @@ fn broker_plans_and_runs_verification_with_jsonl_requests() {
 }
 
 #[test]
+fn broker_jsonl_exposes_queue_cancel_and_lock_tools() {
+    let dir = fixture();
+    let jobs_dir = dir.path().join(".vrt/broker/jobs");
+    fs::create_dir_all(&jobs_dir).expect("jobs dir");
+    fs::write(
+        jobs_dir.join("job_jsonl_cancel.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "job_id": "job_jsonl_cancel",
+            "session_id": "session_jsonl",
+            "plan_id": "plan_jsonl",
+            "status": "queued",
+            "cost": "medium",
+            "created_at": "2026-06-08T00:00:00Z",
+            "updated_at": "2026-06-08T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("job json");
+
+    let queue = broker_request(
+        &dir,
+        serde_json::json!({
+            "id": "queue",
+            "op": "list_queue"
+        }),
+    );
+    assert_eq!(queue["ok"], true);
+    assert_eq!(queue["result"]["queued_jobs"], 1);
+
+    let cancel = broker_request(
+        &dir,
+        serde_json::json!({
+            "id": "cancel",
+            "op": "cancel_job",
+            "arguments": { "job_id": "job_jsonl_cancel" }
+        }),
+    );
+    assert_eq!(cancel["ok"], true);
+    assert_eq!(cancel["result"]["status"], "cancelled");
+
+    let locks = broker_request(
+        &dir,
+        serde_json::json!({
+            "id": "locks",
+            "op": "list_locks"
+        }),
+    );
+    assert_eq!(locks["ok"], true);
+    assert!(locks["result"]["locks"].is_array());
+}
+
+#[test]
 fn broker_unknown_operation_is_structured_error() {
     let dir = fixture();
 

@@ -1981,6 +1981,101 @@ fn brokered_verification_waits_for_exclusive_resource_lock() {
 }
 
 #[test]
+fn brokered_browser_smoke_waits_for_port_resource_lock() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Merge).expect("plan");
+    plan.steps.truncate(1);
+    plan.steps[0].capability_id = "workspace-browser-smoke".to_string();
+    plan.steps[0].command = "sh -c 'echo browser smoke ok'".to_string();
+
+    let lock_dir = dir.path().join(".vrt/broker/locks/port-3000.lock");
+    fs::create_dir_all(&lock_dir).expect("preexisting port lock");
+    fs::write(
+        lock_dir.join("lock.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "resource_id": "port-3000",
+            "kind": "port",
+            "mode": "exclusive",
+            "reason": "Browser smoke owns local app port.",
+            "job_id": "job_existing",
+            "created_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("lock json");
+    let releaser_path = lock_dir.clone();
+    let _releaser = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(120));
+        let _ = fs::remove_dir_all(releaser_path);
+    });
+
+    let evidence =
+        run_verification_brokered(dir.path(), &profile, &change, &plan).expect("brokered run");
+
+    assert_eq!(evidence.validity, "valid");
+    assert!(evidence.lock_wait_ms >= 50);
+    assert!(evidence.resource_locks.iter().any(|lock| {
+        lock.resource_id == "port-3000" && lock.kind == "port" && lock.waited_ms >= 50
+    }));
+    assert!(evidence
+        .resource_locks
+        .iter()
+        .any(|lock| { lock.resource_id == "playwright-browser" && lock.kind == "browser" }));
+    assert_eq!(evidence.runner_pool, "exclusive");
+}
+
+#[test]
+fn brokered_prisma_generate_waits_for_generated_client_lock() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Merge).expect("plan");
+    plan.steps.truncate(1);
+    plan.steps[0].capability_id = "workspace-schema-generate".to_string();
+    plan.steps[0].command = "sh -c 'echo prisma generate ok'".to_string();
+
+    let lock_dir = dir.path().join(".vrt/broker/locks/prisma-client.lock");
+    fs::create_dir_all(&lock_dir).expect("preexisting prisma lock");
+    fs::write(
+        lock_dir.join("lock.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "resource_id": "prisma-client",
+            "kind": "generated_artifact",
+            "mode": "exclusive",
+            "reason": "Prisma client generation writes shared generated files.",
+            "job_id": "job_existing",
+            "created_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("lock json");
+    let releaser_path = lock_dir.clone();
+    let _releaser = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(120));
+        let _ = fs::remove_dir_all(releaser_path);
+    });
+
+    let evidence =
+        run_verification_brokered(dir.path(), &profile, &change, &plan).expect("brokered run");
+
+    assert_eq!(evidence.validity, "valid");
+    assert!(evidence.lock_wait_ms >= 50);
+    assert!(evidence.resource_locks.iter().any(|lock| {
+        lock.resource_id == "prisma-client"
+            && lock.kind == "generated_artifact"
+            && lock.waited_ms >= 50
+    }));
+}
+
+#[test]
 fn brokered_verification_waits_for_runner_pool_slot() {
     let dir = fixture();
     let profile = initialize_project(dir.path()).expect("init project");
@@ -2022,6 +2117,58 @@ fn brokered_verification_waits_for_runner_pool_slot() {
     );
     assert_eq!(evidence.runner_pool, "expensive");
     assert!(!slot_dir.exists());
+}
+
+#[test]
+fn brokered_verification_reports_queued_while_waiting_for_runner_pool() {
+    let dir = fixture();
+    let profile = initialize_project(dir.path()).expect("init project");
+    let graph = build_capability_graph(dir.path(), &profile).expect("capability graph");
+    let change = analyze_change(dir.path(), &profile).expect("change");
+    let mut plan =
+        plan_verification(&profile, &graph, &change, VerificationMode::Release).expect("plan");
+    plan.steps
+        .retain(|step| step.capability_id.contains("build"));
+    plan.steps[0].command = "sh -c 'echo build ok'".to_string();
+
+    let slot_dir = dir.path().join(".vrt/broker/pools/expensive/slot-0.lock");
+    fs::create_dir_all(&slot_dir).expect("preexisting pool slot");
+    fs::write(
+        slot_dir.join("slot.json"),
+        serde_json::json!({
+            "pool": "expensive",
+            "slot": 0,
+            "job_id": "job_existing",
+            "created_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("slot json");
+
+    let root = dir.path().to_path_buf();
+    let profile_for_run = profile.clone();
+    let change_for_run = change.clone();
+    let plan_for_run = plan.clone();
+    let handle = thread::spawn(move || {
+        run_verification_brokered(&root, &profile_for_run, &change_for_run, &plan_for_run)
+            .expect("brokered run")
+    });
+
+    let mut saw_queued = false;
+    for _ in 0..20 {
+        let queue = vrt_core::queue_status(dir.path());
+        if queue["queued_jobs"] == 1 {
+            saw_queued = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    fs::remove_dir_all(&slot_dir).expect("release slot");
+    let evidence = handle.join().expect("run thread");
+
+    assert!(saw_queued, "broker job was not visible as queued");
+    assert_eq!(evidence.validity, "valid");
+    assert!(evidence.queue_wait_ms >= 50);
 }
 
 #[test]
@@ -2109,6 +2256,74 @@ fn queue_status_reports_active_runner_pool_slots() {
     assert_eq!(queue["runner_pool"]["expensive"]["limit"], 1);
     assert_eq!(queue["runner_pool"]["expensive"]["running"], 1);
     assert_eq!(queue["runner_pool"]["cheap"]["running"], 0);
+}
+
+#[test]
+fn queue_status_summarizes_broker_job_ledger() {
+    let dir = fixture();
+    let jobs_dir = dir.path().join(".vrt/broker/jobs");
+    fs::create_dir_all(&jobs_dir).expect("jobs dir");
+    for (job_id, status) in [
+        ("job_running", "running"),
+        ("job_queued", "queued"),
+        ("job_cancelled", "cancelled"),
+    ] {
+        fs::write(
+            jobs_dir.join(format!("{job_id}.json")),
+            serde_json::json!({
+                "schema_version": 1,
+                "job_id": job_id,
+                "session_id": "session_queue",
+                "plan_id": "plan_queue",
+                "status": status,
+                "cost": "medium",
+                "created_at": chrono::Utc::now(),
+                "updated_at": chrono::Utc::now()
+            })
+            .to_string(),
+        )
+        .expect("job json");
+    }
+
+    let queue = vrt_core::queue_status(dir.path());
+
+    assert_eq!(queue["queued_jobs"], 1);
+    assert_eq!(queue["running_jobs"], 1);
+    assert_eq!(queue["cancelled_jobs"], 1);
+    assert_eq!(queue["waiting"][0]["job_id"], "job_queued");
+    assert_eq!(queue["running"][0]["job_id"], "job_running");
+}
+
+#[test]
+fn cancel_queue_job_marks_queued_job_cancelled() {
+    let dir = fixture();
+    let jobs_dir = dir.path().join(".vrt/broker/jobs");
+    fs::create_dir_all(&jobs_dir).expect("jobs dir");
+    let job_path = jobs_dir.join("job_cancel_me.json");
+    fs::write(
+        &job_path,
+        serde_json::json!({
+            "schema_version": 1,
+            "job_id": "job_cancel_me",
+            "session_id": "session_queue",
+            "plan_id": "plan_queue",
+            "status": "queued",
+            "cost": "expensive",
+            "created_at": chrono::Utc::now(),
+            "updated_at": chrono::Utc::now()
+        })
+        .to_string(),
+    )
+    .expect("job json");
+
+    let result = vrt_core::cancel_queue_job(dir.path(), "job_cancel_me").expect("cancel job");
+    let updated: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(job_path).expect("updated job"))
+            .expect("updated job json");
+
+    assert_eq!(result["status"], "cancelled");
+    assert_eq!(updated["status"], "cancelled");
+    assert_eq!(result["queue"]["cancelled_jobs"], 1);
 }
 
 #[test]

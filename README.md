@@ -102,6 +102,7 @@ vrt session view --json
 vrt broker start --json
 vrt broker stop --json
 vrt queue status --json
+vrt queue cancel <job-id> --json
 vrt lock list --json
 vrt report --format markdown --output .vrt/reports/vrt.md
 vrt report --format sarif --output .vrt/reports/vrt.sarif
@@ -195,6 +196,7 @@ vrt explain
 vrt explain --json
 vrt skill install
 vrt bench
+vrt bench --concurrency --json
 vrt session start --worktree ../my-repo-agent-a
 vrt session status --json
 vrt session list --json
@@ -325,6 +327,8 @@ For repeated local requests after a valid run, VRT can reuse an exact-match cach
 `vrt bench --json` reports `cache_hits`, `cache_hit_rate`, `evidence_reuse_rate`, `reused_checks`, `reruns_avoided`, `early_failures`, `ci_failures_shifted_left`, `stale_evidence_detected`, `log_lines_compressed`, `agent_tokens_saved_estimate`, `queue_wait_time_ms`, `lock_wait_time_ms`, `singleflight_hits`, `duplicate_commands_avoided`, `resource_conflicts_avoided`, `runner_pool_utilization`, `session_count`, `shared_evidence_count`, `estimated_saved_time_ms`, and a `saved_by` breakdown for skipped expensive checks and exact evidence reuse. These are conservative local estimates; skipped checks remain residual risk.
 
 `vrt verify --broker` submits the run through the repo-local broker control plane and writes `.vrt/broker/jobs/<job-id>.json`; the evidence includes `broker_job_id`. If broker state is running, `vrt verify` uses that path automatically unless `--no-broker` is passed. `vrt session start --worktree <path>` creates an optional git worktree session for parallel Agent work. VRT writes session metadata under `.vrt/session.json` and `.vrt/sessions/<session-id>.json` in both the original repository and the new worktree. Agents should `cd` into the worktree and export the shown `VRT_SESSION_ID` before running verification. `vrt session view --json` aggregates all recorded sessions with latest evidence, active lock state, confidence, and false-confidence counts.
+
+`vrt queue status --json` summarizes the repo-local job ledger under `.vrt/broker/jobs/*.json`, including queued, running, and cancelled jobs. `vrt queue cancel <job-id> --json` only marks jobs that are still queued; running or completed verification is not retroactively cancelled.
 
 `vrt report --format markdown|sarif|junit|otel --output <path>` exports the latest evidence without rerunning checks. Markdown is a PR-ready proof artifact with confidence, residual risks, and raw-log references. SARIF contains failed checks as code-scanning results. JUnit contains every run or reused check as a testcase. OpenTelemetry JSON contains a `vrt.verify` root span plus check and skipped-check child spans with evidence, confidence, raw-log, and residual-risk attributes.
 
