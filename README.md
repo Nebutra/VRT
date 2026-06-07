@@ -239,7 +239,7 @@ Tools:
 
 It deliberately does not expose `run_any_shell_command`. Verification execution still goes through VRT plans and project-owned capabilities.
 
-`vrt broker serve` exposes the same bounded verification operations over line-oriented JSON for local token-saving agents. Requests can use `op`/`arguments` or `method`/`params`; responses return `{ "id": ..., "ok": true, "result": ... }` or `{ "ok": false, "error": ... }`. Supported operations are `status`, `analyze_change`, `plan_verification`, `run_verification`, `explain_failure`, `get_evidence`, `escalate_verification`, `session_view`, and `shutdown`.
+`vrt broker serve` exposes the same bounded verification operations over line-oriented JSON for local token-saving agents. Requests can use `op`/`arguments` or `method`/`params`; responses return `{ "id": ..., "ok": true, "result": ... }` or `{ "ok": false, "error": ... }`. Supported operations are `status`, `analyze_change`, `plan_verification`, `run_verification`, `explain_failure`, `get_evidence`, `escalate_verification`, `get_broker_status`, `list_sessions`, `show_session`, `list_queue`, `cancel_job`, `list_locks`, `start_session`, `close_session`, `session_view`, and `shutdown`.
 
 `explain_failure` and `get_evidence` accept an optional `evidence_id`, so token-saving agents can retrieve or explain an older compacted run without relying on `.vrt/latest.json`.
 
