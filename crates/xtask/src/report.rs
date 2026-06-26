@@ -62,6 +62,21 @@ pub fn emit(out_dir: &Path, run: &ProofRun) -> Result<()> {
         }
     }
 
+    for (naive, vrt) in &run.transcripts {
+        fs::write(
+            out_dir
+                .join("agent-transcripts")
+                .join(format!("{}-naive.json", naive.scenario)),
+            serde_json::to_string_pretty(naive)?,
+        )?;
+        fs::write(
+            out_dir
+                .join("agent-transcripts")
+                .join(format!("{}-vrt.json", vrt.scenario)),
+            serde_json::to_string_pretty(vrt)?,
+        )?;
+    }
+
     for (i, fc) in run.false_confidence.iter().enumerate() {
         fs::write(
             out_dir
@@ -118,6 +133,33 @@ fn summary_md(run: &ProofRun) -> String {
         m.high_risk_underverified_count
     ));
 
+    let a = &m.agent;
+    s.push_str("## Agent behaviour A/B (Canvas §6.3, Proposition B)\n\n");
+    s.push_str("Deterministic naive vs VRT-guided policies over real per-scenario outputs.\n\n");
+    s.push_str(&format!(
+        "- expensive_commands_avoided: **{:.0}%** (naive {} → vrt {}; bar ≥30%)\n",
+        a.expensive_commands_avoided_pct, a.naive_expensive_total, a.vrt_expensive_total
+    ));
+    s.push_str(&format!(
+        "- explain_after_failure_rate: **{:.0}%** over {} failure scenarios (bar ≥80%)\n",
+        a.explain_after_failure_rate * 100.0,
+        a.failure_scenarios
+    ));
+    s.push_str(&format!(
+        "- ignored_do_not_run_count: **{}** (bar =0)\n",
+        a.ignored_do_not_run_count
+    ));
+    s.push_str(&format!(
+        "- residual_risk_preserved_rate: **{:.0}%** ({}/{}; bar ≥95%)\n",
+        a.residual_risk_preserved_rate * 100.0,
+        a.residual_risks_preserved_total,
+        a.residual_risks_received_total
+    ));
+    s.push_str(&format!(
+        "- log_lines_read_by_agent: naive {} → vrt {}\n\n",
+        a.log_lines_read_naive, a.log_lines_read_vrt
+    ));
+
     s.push_str("## Scenarios\n\n");
     for o in &run.outcomes {
         s.push_str(&format!("### {} — {:?}\n\n", o.title, o.verdict));
@@ -155,7 +197,7 @@ fn summary_md(run: &ProofRun) -> String {
     }
 
     s.push_str("## Known limitations\n\n");
-    s.push_str("- Proposition B (agent efficiency) and parts of E (AI-native) require agent-transcript A/B scenarios not yet automated; reported as UNPROVEN, never as PASS (Canvas §20).\n");
+    s.push_str("- Proposition B is measured from DETERMINISTIC agent policies over real VRT outputs, not a live LLM. The metrics are falsifiable (they degrade if VRT omits do_not_run / root causes / residual risks), but a live-LLM A/B eval remains future work and is not claimed as done (Canvas §20).\n");
     s.push_str("- Baseline commands for fixtures without an installed toolchain are reported `not_available` and excluded from measured savings (Canvas §2.1).\n");
     s.push_str("- This package proves local feedback and governance properties; it does not claim to replace CI (Canvas §20.2).\n");
     s

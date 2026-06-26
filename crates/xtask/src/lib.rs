@@ -4,6 +4,7 @@
 //! against real fixtures, measures wall-clock truth, and refuses to let skipped
 //! work, stale evidence, or release over-claims pass unnoticed (Canvas §1).
 
+pub mod agent;
 pub mod detectors;
 pub mod model;
 pub mod proof;

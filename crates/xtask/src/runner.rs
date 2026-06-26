@@ -118,6 +118,7 @@ pub fn run_command(dir: &Path, label: &str, command: &str) -> CommandRun {
                 exit_code: None,
                 duration_ms: 0,
                 measured: false,
+                output_lines: 0,
             };
         }
     }
@@ -129,18 +130,23 @@ pub fn run_command(dir: &Path, label: &str, command: &str) -> CommandRun {
         .output();
     let duration_ms = start.elapsed().as_millis();
     match output {
-        Ok(out) => CommandRun {
-            label: label.to_string(),
-            command: command.to_string(),
-            status: if out.status.success() {
-                RunStatus::Passed
-            } else {
-                RunStatus::Failed
-            },
-            exit_code: out.status.code(),
-            duration_ms,
-            measured: true,
-        },
+        Ok(out) => {
+            let lines = String::from_utf8_lossy(&out.stdout).lines().count()
+                + String::from_utf8_lossy(&out.stderr).lines().count();
+            CommandRun {
+                label: label.to_string(),
+                command: command.to_string(),
+                status: if out.status.success() {
+                    RunStatus::Passed
+                } else {
+                    RunStatus::Failed
+                },
+                exit_code: out.status.code(),
+                duration_ms,
+                measured: true,
+                output_lines: lines as u64,
+            }
+        }
         Err(_) => CommandRun {
             label: label.to_string(),
             command: command.to_string(),
@@ -148,6 +154,7 @@ pub fn run_command(dir: &Path, label: &str, command: &str) -> CommandRun {
             exit_code: None,
             duration_ms: 0,
             measured: false,
+            output_lines: 0,
         },
     }
 }

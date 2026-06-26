@@ -9,7 +9,7 @@ use serde::Serialize;
 /// Outcome of a single executed command. `NotAvailable` is a real, honest
 /// state: when a toolchain is missing we record it instead of inventing a
 /// duration (Canvas §2.1, §7.7).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Passed,
@@ -37,6 +37,9 @@ pub struct CommandRun {
     pub exit_code: Option<i32>,
     pub duration_ms: u128,
     pub measured: bool,
+    /// Lines of stdout+stderr the command produced — the raw log a naive agent
+    /// would read on failure (Canvas §6.1 log_lines_read_by_agent).
+    pub output_lines: u64,
 }
 
 /// A single assertion checked against a scenario's VRT evidence.
@@ -147,6 +150,8 @@ pub struct ProofMetrics {
     pub ci_failures_shifted_left: u64,
     pub full_builds_avoided: u64,
     pub hard_failure_count: u64,
+    /// §6.3 agent-behaviour metrics (Proposition B).
+    pub agent: crate::agent::AgentMetrics,
 }
 
 /// Per-proposition pass/fail used by the Canvas §18 verdict block.

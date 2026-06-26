@@ -7,6 +7,7 @@ use std::process::Command;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::agent::{self, AgentTranscript};
 use crate::detectors;
 use crate::model::*;
 use crate::runner::{self, CleanRoom};
@@ -20,6 +21,8 @@ pub struct ProofRun {
     /// Scenarios where VRT did not fail yet a baseline check it skipped would
     /// have failed (Canvas §7.10). Each is a recorded false-confidence case.
     pub false_confidence: Vec<FalseConfidenceFinding>,
+    /// Per-scenario (naive, vrt-guided) agent transcripts (Canvas §11.3).
+    pub transcripts: Vec<(AgentTranscript, AgentTranscript)>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -90,7 +93,13 @@ fn detect_false_confidence(
     findings
 }
 
-fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<(ScenarioOutcome, Vec<FalseConfidenceFinding>)> {
+type EvalResult = (
+    ScenarioOutcome,
+    Vec<FalseConfidenceFinding>,
+    (AgentTranscript, AgentTranscript),
+);
+
+fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
     // Baseline clean room.
     let baseline_room: CleanRoom = runner::prepare(&scenario.fixture, &scenario.mutations)?;
     let baseline = runner::run_baseline(baseline_room.path(), &scenario.baseline);
@@ -186,6 +195,11 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<(ScenarioOutcome, Vec
 
     let false_confidence = detect_false_confidence(scenario, &report, &baseline);
 
+    let transcripts = (
+        agent::naive_transcript(&scenario.id, &baseline),
+        agent::vrt_transcript(&scenario.id, &report, &explain),
+    );
+
     let verdict = if !hard_failures.is_empty()
         || assertions.iter().any(|a| !a.passed)
         || !false_confidence.is_empty()
@@ -234,17 +248,20 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<(ScenarioOutcome, Vec
         verdict,
         notes,
     };
-    Ok((outcome, false_confidence))
+    Ok((outcome, false_confidence, transcripts))
 }
 
 pub fn run_all(vrt_bin: &Path, scenarios: &[Scenario], commit: String) -> Result<ProofRun> {
     let mut outcomes = vec![];
     let mut false_confidence = vec![];
+    let mut transcripts = vec![];
     for scenario in scenarios {
-        let (outcome, fc) = evaluate(vrt_bin, scenario)?;
+        let (outcome, fc, pair) = evaluate(vrt_bin, scenario)?;
         outcomes.push(outcome);
         false_confidence.extend(fc);
+        transcripts.push(pair);
     }
+    let agent_metrics = agent::aggregate(&transcripts);
 
     let count_code = |code: &str| {
         outcomes
@@ -295,6 +312,7 @@ pub fn run_all(vrt_bin: &Path, scenarios: &[Scenario], commit: String) -> Result
         ci_failures_shifted_left: outcomes.iter().map(|o| o.ci_failures_shifted_left).sum(),
         full_builds_avoided: outcomes.iter().map(|o| o.full_builds_avoided).sum(),
         hard_failure_count,
+        agent: agent_metrics,
     };
 
     let propositions = derive_propositions(&outcomes, &metrics);
@@ -306,6 +324,7 @@ pub fn run_all(vrt_bin: &Path, scenarios: &[Scenario], commit: String) -> Result
         propositions,
         overall,
         false_confidence,
+        transcripts,
     })
 }
 
@@ -332,9 +351,16 @@ fn derive_propositions(
         Unproven
     };
 
-    // B — agent efficiency needs dedicated agent-transcript scenarios we do not
-    // run yet. Honest non-claim.
-    let b = Unproven;
+    // B — agent efficiency, measured from the A/B transcripts against the §8.2
+    // bar. PASS only when VRT's affordances actually move every metric over the
+    // line; otherwise FAIL, never silently Unproven.
+    let b = if outcomes.is_empty() {
+        Unproven
+    } else if metrics.agent.passes_efficiency_bar() {
+        Pass
+    } else {
+        Fail
+    };
 
     let ci = scenarios_for(outcomes, Proposition::CiSaving);
     let c = if all_pass(&ci) && metrics.ci_failures_shifted_left >= 1 {
@@ -456,6 +482,25 @@ mod tests {
             ci_failures_shifted_left: 0,
             full_builds_avoided: 0,
             hard_failure_count,
+            agent: passing_agent(),
+        }
+    }
+
+    // Agent metrics that clear the §8.2 bar, for tests that model an otherwise
+    // healthy run.
+    fn passing_agent() -> crate::agent::AgentMetrics {
+        crate::agent::AgentMetrics {
+            expensive_commands_avoided_pct: 100.0,
+            naive_expensive_total: 2,
+            vrt_expensive_total: 0,
+            explain_after_failure_rate: 1.0,
+            failure_scenarios: 0,
+            ignored_do_not_run_count: 0,
+            residual_risk_preserved_rate: 1.0,
+            residual_risks_received_total: 3,
+            residual_risks_preserved_total: 3,
+            log_lines_read_naive: 200,
+            log_lines_read_vrt: 1,
         }
     }
 
