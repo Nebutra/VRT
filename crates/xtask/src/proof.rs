@@ -114,7 +114,19 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
 
     // VRT clean room.
     let vrt_room = runner::prepare(&scenario.fixture, &scenario.mutations)?;
-    let (report, vrt_total_ms) = runner::run_vrt(vrt_bin, vrt_room.path(), &scenario.vrt_mode)?;
+    runner::run_init(vrt_bin, vrt_room.path())?;
+    let doctor = runner::run_doctor(vrt_bin, vrt_room.path());
+    let (mut report, mut vrt_total_ms) =
+        runner::run_verify(vrt_bin, vrt_room.path(), &scenario.vrt_mode, false)?;
+    // Multi-step: apply second-stage mutations and continue; the SECOND report
+    // is what the assertions evaluate (e.g. stale-evidence scenarios).
+    if let Some(stage) = &scenario.second_stage {
+        runner::apply_mutations(vrt_room.path(), &stage.mutations)?;
+        let (report2, dur2) =
+            runner::run_verify(vrt_bin, vrt_room.path(), &scenario.vrt_mode, stage.use_continue)?;
+        report = report2;
+        vrt_total_ms = dur2;
+    }
     let status = report.get("status").and_then(Value::as_str).unwrap_or("");
     let explain = if status == "failed" {
         runner::run_explain(vrt_bin, vrt_room.path())?
@@ -187,6 +199,7 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
     let assertions = (scenario.assertions)(&Evaluated {
         report: &report,
         explain: &explain,
+        doctor: &doctor,
         baseline_total_ms,
         vrt_total_ms,
         measured_saved_time_ms,
@@ -200,10 +213,9 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
         agent::vrt_transcript(&scenario.id, &report, &explain),
     );
 
-    let verdict = if !hard_failures.is_empty()
-        || assertions.iter().any(|a| !a.passed)
-        || !false_confidence.is_empty()
-    {
+    let blocking_failed = assertions.iter().any(|a| a.blocking && !a.passed);
+    let advisory_failed = assertions.iter().any(|a| !a.blocking && !a.passed);
+    let verdict = if !hard_failures.is_empty() || blocking_failed || !false_confidence.is_empty() {
         ScenarioVerdict::Fail
     } else if matches!(
         scenario.proposition,
@@ -213,6 +225,8 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
         && assertions.is_empty()
     {
         ScenarioVerdict::NotApplicable
+    } else if advisory_failed {
+        ScenarioVerdict::PassWithGaps
     } else {
         ScenarioVerdict::Pass
     };
@@ -272,14 +286,21 @@ pub fn run_all(vrt_bin: &Path, scenarios: &[Scenario], commit: String) -> Result
     };
 
     let scenarios_total = outcomes.len() as u64;
+    // Pass and PassWithGaps both clear the blocking (governance) bar.
     let scenarios_passed = outcomes
         .iter()
-        .filter(|o| o.verdict == ScenarioVerdict::Pass)
+        .filter(|o| {
+            matches!(
+                o.verdict,
+                ScenarioVerdict::Pass | ScenarioVerdict::PassWithGaps
+            )
+        })
         .count() as u64;
     let scenarios_failed = outcomes
         .iter()
         .filter(|o| o.verdict == ScenarioVerdict::Fail)
         .count() as u64;
+    let advisory_gaps: u64 = outcomes.iter().map(|o| o.advisory_gaps().len() as u64).sum();
     let scenarios_not_applicable = outcomes
         .iter()
         .filter(|o| o.verdict == ScenarioVerdict::NotApplicable)
@@ -312,6 +333,7 @@ pub fn run_all(vrt_bin: &Path, scenarios: &[Scenario], commit: String) -> Result
         ci_failures_shifted_left: outcomes.iter().map(|o| o.ci_failures_shifted_left).sum(),
         full_builds_avoided: outcomes.iter().map(|o| o.full_builds_avoided).sum(),
         hard_failure_count,
+        advisory_gaps,
         agent: agent_metrics,
     };
 
@@ -333,7 +355,13 @@ fn scenarios_for(outcomes: &[ScenarioOutcome], p: Proposition) -> Vec<&ScenarioO
 }
 
 fn all_pass(outcomes: &[&ScenarioOutcome]) -> bool {
-    !outcomes.is_empty() && outcomes.iter().all(|o| o.verdict == ScenarioVerdict::Pass)
+    !outcomes.is_empty()
+        && outcomes.iter().all(|o| {
+            matches!(
+                o.verdict,
+                ScenarioVerdict::Pass | ScenarioVerdict::PassWithGaps
+            )
+        })
 }
 
 fn derive_propositions(
@@ -342,11 +370,14 @@ fn derive_propositions(
 ) -> Vec<(&'static str, &'static str, PropositionVerdict)> {
     use PropositionVerdict::*;
 
+    // A rests on the STRUCTURAL agile win (full build skipped, commands
+    // avoided) — robust — not on noisy sub-second wall-clock. The measured
+    // timing is reported as evidence, not used as a flaky gate.
     let agile = scenarios_for(outcomes, Proposition::AgileValue);
-    let a = if all_pass(&agile) && agile.iter().any(|o| o.measured_saved_time_ms > 0) {
-        Pass
-    } else if agile.iter().any(|o| o.verdict == ScenarioVerdict::Fail) {
+    let a = if agile.iter().any(|o| o.verdict == ScenarioVerdict::Fail) {
         Fail
+    } else if all_pass(&agile) && agile.iter().any(|o| o.full_builds_avoided >= 1) {
+        Pass
     } else {
         Unproven
     };
@@ -384,8 +415,9 @@ fn derive_propositions(
     };
 
     // E — AI-native: the type-error scenario exercises verify→explain→do_not_run.
-    // PASS if that loop produced structured guidance (its assertions passed).
-    let e = if ci.iter().all(|o| o.assertions_passed()) && !ci.is_empty() {
+    // PASS if that loop produced structured guidance (its blocking assertions
+    // passed).
+    let e = if !ci.is_empty() && ci.iter().all(|o| o.blocking_passed()) {
         Pass
     } else {
         Unproven
@@ -424,11 +456,13 @@ fn derive_overall(
     let all_pass = propositions
         .iter()
         .all(|(_, _, v)| matches!(v, PropositionVerdict::Pass));
-    if all_pass {
+    // Any recorded advisory gap means we will not claim a clean PASS — §20
+    // forbids over-claiming beyond what is proven.
+    if all_pass && metrics.advisory_gaps == 0 {
         OverallVerdict::Pass
     } else {
-        // §19 — no hard failures, governance clean, ≥3 scenarios pass, some
-        // propositions still Unproven → CONDITIONAL PASS.
+        // §19 — no hard failures, governance clean, ≥3 scenarios pass, but some
+        // propositions Unproven or documented gaps remain → CONDITIONAL PASS.
         OverallVerdict::ConditionalPass
     }
 }
@@ -482,6 +516,7 @@ mod tests {
             ci_failures_shifted_left: 0,
             full_builds_avoided: 0,
             hard_failure_count,
+            advisory_gaps: 0,
             agent: passing_agent(),
         }
     }

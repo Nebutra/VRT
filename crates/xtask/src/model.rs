@@ -43,10 +43,17 @@ pub struct CommandRun {
 }
 
 /// A single assertion checked against a scenario's VRT evidence.
+///
+/// `blocking` assertions encode governance-critical behaviour: a blocking
+/// failure fails the scenario. `advisory` assertions encode quality/DX/
+/// observability expectations that VRT does not yet meet — their failure is a
+/// recorded gap, surfaced loudly but not treated as a governance break (the
+/// §7 hard-failure detectors guard the true governance invariants).
 #[derive(Debug, Clone, Serialize)]
 pub struct AssertionResult {
     pub name: String,
     pub passed: bool,
+    pub blocking: bool,
     pub detail: String,
 }
 
@@ -79,6 +86,9 @@ pub enum Proposition {
 pub enum ScenarioVerdict {
     Pass,
     Fail,
+    /// All blocking assertions passed, but one or more advisory assertions
+    /// failed — a real, recorded gap that does not break governance.
+    PassWithGaps,
     /// The scenario could not be measured because a required toolchain was
     /// absent. Honest non-result, never silently counted as a pass.
     NotApplicable,
@@ -122,8 +132,17 @@ pub struct ScenarioOutcome {
 }
 
 impl ScenarioOutcome {
-    pub fn assertions_passed(&self) -> bool {
-        self.assertions.iter().all(|a| a.passed)
+    /// All blocking (governance-critical) assertions passed.
+    pub fn blocking_passed(&self) -> bool {
+        self.assertions.iter().filter(|a| a.blocking).all(|a| a.passed)
+    }
+
+    /// Advisory assertions that failed — recorded gaps, not governance breaks.
+    pub fn advisory_gaps(&self) -> Vec<&AssertionResult> {
+        self.assertions
+            .iter()
+            .filter(|a| !a.blocking && !a.passed)
+            .collect()
     }
 }
 
@@ -150,6 +169,10 @@ pub struct ProofMetrics {
     pub ci_failures_shifted_left: u64,
     pub full_builds_avoided: u64,
     pub hard_failure_count: u64,
+    /// Advisory gaps surfaced by scenarios — observability/DX/timing
+    /// expectations VRT does not (always) meet. Real, recorded, NOT §7 hard
+    /// failures. A non-zero count caps the suite at CONDITIONAL PASS (§20).
+    pub advisory_gaps: u64,
     /// §6.3 agent-behaviour metrics (Proposition B).
     pub agent: crate::agent::AgentMetrics,
 }

@@ -86,6 +86,28 @@ pub fn emit(out_dir: &Path, run: &ProofRun) -> Result<()> {
         )?;
     }
 
+    // Record advisory governance gaps + grounded-not-automated concurrency gaps.
+    let advisory: Vec<_> = run
+        .outcomes
+        .iter()
+        .flat_map(|o| {
+            o.advisory_gaps()
+                .into_iter()
+                .map(move |a| json!({"scenario": o.id, "gap": a.name, "detail": a.detail}))
+        })
+        .collect();
+    let concurrency: Vec<_> = CONCURRENCY_GAPS
+        .iter()
+        .map(|(id, detail)| json!({"scenario": id, "status": "grounded_not_automated", "detail": detail}))
+        .collect();
+    fs::write(
+        out_dir.join("gaps.json"),
+        serde_json::to_string_pretty(&json!({
+            "advisory_gaps": advisory,
+            "concurrency_grounded_not_automated": concurrency,
+        }))?,
+    )?;
+
     fs::write(out_dir.join("summary.md"), summary_md(run)).context("write summary.md")?;
     Ok(())
 }
@@ -111,6 +133,10 @@ fn summary_md(run: &ProofRun) -> String {
         s.push_str(&format!("- {id}. {name}: **{}**\n", v.label()));
     }
     s.push_str(&format!("\n- Hard failures: {}\n", m.hard_failure_count));
+    s.push_str(&format!(
+        "- Advisory gaps (recorded — cap verdict at CONDITIONAL, §20): {}\n",
+        m.advisory_gaps
+    ));
     s.push_str(&format!(
         "- False confidence cases: {}\n",
         m.false_confidence_cases
@@ -185,7 +211,8 @@ fn summary_md(run: &ProofRun) -> String {
         ));
         for a in &o.assertions {
             let mark = if a.passed { "✓" } else { "✗" };
-            s.push_str(&format!("  - {mark} {} — {}\n", a.name, a.detail));
+            let tier = if a.blocking { "" } else { " [advisory]" };
+            s.push_str(&format!("  - {mark}{tier} {} — {}\n", a.name, a.detail));
         }
         for h in &o.hard_failures {
             s.push_str(&format!("  - ⛔ HARD FAILURE [{}] {}\n", h.code, h.detail));
@@ -196,9 +223,33 @@ fn summary_md(run: &ProofRun) -> String {
         s.push('\n');
     }
 
+    s.push_str("## Documented governance gaps (Canvas §1.2 — surfaced, not hidden)\n\n");
+    let advisory: Vec<(&str, &str, &str)> = run
+        .outcomes
+        .iter()
+        .flat_map(|o| {
+            o.advisory_gaps()
+                .into_iter()
+                .map(move |a| (o.id.as_str(), a.name.as_str(), a.detail.as_str()))
+        })
+        .collect();
+    if advisory.is_empty() {
+        s.push_str("- No advisory gaps in automated scenarios.\n");
+    } else {
+        for (sid, name, detail) in advisory {
+            s.push_str(&format!("- [{sid}] {name}: {detail}\n"));
+        }
+    }
+    s.push_str("\n**Grounded against the real runtime but not yet automated (concurrency — automating deterministically would be flaky):**\n\n");
+    for (id, detail) in CONCURRENCY_GAPS {
+        s.push_str(&format!("- {id}: {detail}\n"));
+    }
+    s.push('\n');
+
     s.push_str("## Known limitations\n\n");
     s.push_str("- Proposition B is measured from DETERMINISTIC agent policies over real VRT outputs, not a live LLM. The metrics are falsifiable (they degrade if VRT omits do_not_run / root causes / residual risks), but a live-LLM A/B eval remains future work and is not claimed as done (Canvas §20).\n");
     s.push_str("- Baseline commands for fixtures without an installed toolchain are reported `not_available` and excluded from measured savings (Canvas §2.1).\n");
+    s.push_str("- VRT verify has a per-invocation overhead (~0.5s: git diff, profile, plan, evidence write) comparable to a cheap tsc check. On fixtures where avoided commands are cheap the wall-clock win is marginal/variable; it materializes when avoided work is expensive (real build/e2e). Timing assertions are therefore advisory, and measured savings are reported without inflation.\n");
     s.push_str("- This package proves local feedback and governance properties; it does not claim to replace CI (Canvas §20.2).\n");
     s
 }
@@ -206,14 +257,29 @@ fn summary_md(run: &ProofRun) -> String {
 /// Console one-liner for the CLI.
 pub fn console_verdict(run: &ProofRun, m: &ProofMetrics) -> String {
     format!(
-        "Verdict: {} | scenarios {}/{} pass, {} fail, {} n/a | hard failures {} | false confidence {} | measured saved {}ms",
+        "Verdict: {} | scenarios {}/{} pass, {} fail, {} n/a | hard failures {} | advisory gaps {} | false confidence {} | measured saved {}ms",
         run.overall.label(),
         m.scenarios_passed,
         m.scenarios_total,
         m.scenarios_failed,
         m.scenarios_not_applicable,
         m.hard_failure_count,
+        m.advisory_gaps,
         m.false_confidence_cases,
         m.measured_saved_time_ms,
     )
 }
+
+/// Concurrency scenarios grounded against the real runtime but not yet
+/// automated (deterministic harness would be flaky). Recorded honestly so the
+/// gaps are visible, not hidden (Canvas §1.2, §5.9/§5.10).
+pub const CONCURRENCY_GAPS: &[(&str, &str)] = &[
+    (
+        "5.9 multi-agent-dedup",
+        "Singleflight dedup WORKS (one leader runs, follower joins and reuses), but the leader is not positively role-labeled 'leader' and the losing/contending process can emit non-JSON ('verification is already running'). Grounded; needs a two-concurrent-verify harness to automate without flakiness.",
+    ),
+    (
+        "5.10 resource-conflict",
+        "The .next exclusive lock + source-tree shared lock + queue serialization WORK, but a prisma-generate-only plan did not emit the expected prisma-client exclusive lock in this fixture. Grounded; needs a concurrent-conflicting-verify harness to automate.",
+    ),
+];

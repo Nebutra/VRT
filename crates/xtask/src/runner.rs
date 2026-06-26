@@ -168,23 +168,21 @@ pub fn run_baseline(dir: &Path, commands: &[(String, String)]) -> Vec<CommandRun
         .collect()
 }
 
-/// Run `vrt init` then `vrt verify --json --no-broker` in a dedicated clean
-/// room, returning the parsed agent report and the measured verify wall-clock.
-pub fn run_vrt(vrt_bin: &Path, dir: &Path, mode: &str) -> Result<(Value, u128)> {
-    let init = Command::new(vrt_bin)
-        .args(["init"])
-        .current_dir(dir)
-        .output()
-        .context("vrt init")?;
-    if !init.status.success() {
-        return Err(anyhow!(
-            "vrt init failed: {}",
-            String::from_utf8_lossy(&init.stderr)
-        ));
+/// `vrt verify [--continue] --mode <mode> --no-broker --json`, returning the
+/// parsed agent report and measured wall-clock. Does NOT run init.
+pub fn run_verify(
+    vrt_bin: &Path,
+    dir: &Path,
+    mode: &str,
+    continue_after: bool,
+) -> Result<(Value, u128)> {
+    let mut args = vec!["verify", "--mode", mode, "--no-broker", "--json"];
+    if continue_after {
+        args.push("--continue");
     }
     let start = Instant::now();
     let verify = Command::new(vrt_bin)
-        .args(["verify", "--mode", mode, "--no-broker", "--json"])
+        .args(&args)
         .current_dir(dir)
         .output()
         .context("vrt verify")?;
@@ -197,6 +195,53 @@ pub fn run_vrt(vrt_bin: &Path, dir: &Path, mode: &str) -> Result<(Value, u128)> 
         )
     })?;
     Ok((report, duration_ms))
+}
+
+/// Run `vrt init` once for a clean room.
+pub fn run_init(vrt_bin: &Path, dir: &Path) -> Result<()> {
+    let init = Command::new(vrt_bin)
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .context("vrt init")?;
+    if !init.status.success() {
+        return Err(anyhow!(
+            "vrt init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// `vrt init` then a single `vrt verify` (first run of a scenario).
+pub fn run_vrt(vrt_bin: &Path, dir: &Path, mode: &str) -> Result<(Value, u128)> {
+    run_init(vrt_bin, dir)?;
+    run_verify(vrt_bin, dir, mode, false)
+}
+
+/// `vrt doctor --json` — profile + capabilities (weak spots).
+pub fn run_doctor(vrt_bin: &Path, dir: &Path) -> Value {
+    Command::new(vrt_bin)
+        .args(["doctor", "--json"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// Apply additional mutations to an existing clean room (the second stage of a
+/// multi-step scenario).
+pub fn apply_mutations(dir: &Path, mutations: &[Mutation]) -> Result<()> {
+    for mutation in mutations {
+        let target = dir.join(&mutation.path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&target, &mutation.contents)
+            .with_context(|| format!("apply mutation {}", mutation.path))?;
+    }
+    Ok(())
 }
 
 /// Run `vrt explain --json` after a failed verify to capture root-cause /
