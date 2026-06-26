@@ -8,3 +8,6 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# Generated adversarial proof package (regenerate with `pnpm proof`)
+.vrt-proof/

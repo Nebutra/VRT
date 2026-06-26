@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test packages/sdk/test/*.test.js packages/vrt/test/*.test.js packages/github-action/test/*.test.js scripts/*.test.mjs",
+    "proof": "cargo xtask proof",
     "docs:dev": "mintlify dev",
     "docs:check": "node scripts/check-mintlify-docs.mjs"
   },

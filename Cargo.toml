@@ -1,7 +1,8 @@
 [workspace]
 members = [
   "crates/vrt-core",
-  "crates/vrt-cli"
+  "crates/vrt-cli",
+  "crates/xtask"
 ]
 resolver = "2"
 
