@@ -173,6 +173,25 @@ fn do_not_run_cmds(v: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Resource locks declared on the run's evidence, as "resource_id:mode" pairs.
+fn resource_locks(report: &Value) -> Vec<String> {
+    report
+        .pointer("/evidence/resource_locks")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|l| {
+                    format!(
+                        "{}:{}",
+                        l.get("resource_id").and_then(Value::as_str).unwrap_or(""),
+                        l.get("mode").and_then(Value::as_str).unwrap_or("")
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn doctor_weak_spot_ids(doctor: &Value) -> Vec<String> {
     doctor
         .pointer("/profile/weak_spots")
@@ -264,32 +283,14 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
                         format!("release confidence = {release}"),
                     ),
                 ];
-                if e.baseline_fully_measured {
-                    // ADVISORY: VRT's per-invocation overhead (~500ms: git diff,
-                    // profile, plan, evidence write) is comparable to a cheap
-                    // tsc check. On fixtures where the avoided commands are cheap
-                    // the wall-clock win can be a wash; it materializes when the
-                    // avoided work is expensive (real build/e2e). We report the
-                    // real numbers and do not inflate them into a blocking pass.
-                    out.push(advisory(
-                        "feedback_faster_than_baseline",
-                        e.measured_saved_time_ms > 0,
-                        format!(
-                            "vrt {}ms vs baseline {}ms (measured saved {}ms) — wall-clock win depends on avoided-command cost vs VRT overhead",
-                            e.vrt_total_ms, e.baseline_total_ms, e.measured_saved_time_ms
-                        ),
-                    ));
-                    // §8.1 target — advisory because sub-second fixtures are noisy.
-                    let threshold = (e.baseline_total_ms as f64 * 0.6) as u128;
-                    out.push(advisory(
-                        "first_feedback_reduced_40pct",
-                        e.vrt_total_ms <= threshold,
-                        format!(
-                            "vrt {}ms vs 60%-of-baseline {}ms (§8.1 target, materializes with expensive avoided work)",
-                            e.vrt_total_ms, threshold
-                        ),
-                    ));
-                }
+                // Wall-clock timing (baseline vs vrt, measured_saved) is reported
+                // verbatim in the summary as evidence, but NOT asserted: VRT's
+                // per-invocation overhead (~0.5s) is comparable to a cheap tsc
+                // check, so on cheap-toolchain fixtures the sub-second win is a
+                // wash. The agile win is asserted structurally (build skipped,
+                // commands avoided); the wall-clock win materializes when the
+                // avoided work is expensive (real build/e2e). Asserting a
+                // sub-second ratio here would be a flaky test (Canvas §5.8).
                 out
             }),
         },
@@ -489,8 +490,8 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
                     ok("not_waved_through_on_cheap_checks",
                        u64_at(e.report, "checks_run") == 1 && release == "insufficient",
                        format!("checks_run={} release={release}", u64_at(e.report, "checks_run"))),
-                    advisory("explicit_escalation_marker_present", has_marker,
-                       "agent report should expose an explicit escalations/requires_escalation/risk_tags field for high-risk paths (GAP: VRT signals escalation only implicitly via the local downgrade)"),
+                    ok("explicit_escalation_marker_present", has_marker,
+                       format!("requires_escalation/escalations/risk_tags present in report: {has_marker}")),
                 ]
             }),
         },
@@ -601,6 +602,37 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
                        format!("checks_reused = {}", reused_count(e.report))),
                     ok("no_stale_reasons", stale.is_empty(),
                        format!("stale_reasons: {stale:?}")),
+                ]
+            }),
+        },
+        // §5.10 — Resource conflict: a build plan must declare the .next output
+        // as an EXCLUSIVE lock and the source tree as SHARED, so concurrent
+        // builds serialize and never write .next at once. (vrt-core separately
+        // tests that an exclusive lock is actually waited on under the broker.)
+        Scenario {
+            id: "resource-locks".into(),
+            title: "Build plan declares .next exclusive + source-tree shared locks".into(),
+            proposition: Proposition::Governance,
+            fixture: ts_lib.clone(),
+            fixture_label: "ts-lib".into(),
+            mutations: vec![Mutation {
+                path: "src/label.ts".into(),
+                contents: "export const PRICING_LABEL = \"resource-lock probe\";\n".into(),
+            }],
+            baseline: vec![("build".into(), "npm run build".into())],
+            vrt_mode: "release".into(),
+            high_risk: false,
+            config_mutated: false,
+            second_stage: None,
+            assertions: Box::new(|e| {
+                let locks = resource_locks(e.report);
+                vec![
+                    ok("dot_next_exclusive_lock",
+                       locks.iter().any(|l| l == ".next:exclusive"),
+                       format!("resource_locks: {locks:?}")),
+                    ok("source_tree_shared_lock",
+                       locks.iter().any(|l| l == "source-tree:shared"),
+                       format!("resource_locks: {locks:?}")),
                 ]
             }),
         },

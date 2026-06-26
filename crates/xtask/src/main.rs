@@ -60,7 +60,7 @@ fn run_proof(out: PathBuf) -> Result<()> {
 
     let scenarios = scenarios::all_scenarios(&xtask_dir, &root);
     eprintln!("running {} adversarial scenarios…", scenarios.len());
-    let run = proof::run_all(&vrt_bin, &scenarios, commit)?;
+    let run = proof::run_all(&vrt_bin, &scenarios, &xtask_dir, commit)?;
 
     let out_dir = if out.is_absolute() { out } else { root.join(out) };
     report::emit(&out_dir, &run).context("emit proof package")?;

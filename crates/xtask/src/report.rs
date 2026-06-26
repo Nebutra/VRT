@@ -240,7 +240,7 @@ fn summary_md(run: &ProofRun) -> String {
             s.push_str(&format!("- [{sid}] {name}: {detail}\n"));
         }
     }
-    s.push_str("\n**Grounded against the real runtime but not yet automated (concurrency — automating deterministically would be flaky):**\n\n");
+    s.push_str("\n**Residual concurrency edges (5.9/5.10 are automated; these narrow edges are documented):**\n\n");
     for (id, detail) in CONCURRENCY_GAPS {
         s.push_str(&format!("- {id}: {detail}\n"));
     }
@@ -270,16 +270,16 @@ pub fn console_verdict(run: &ProofRun, m: &ProofMetrics) -> String {
     )
 }
 
-/// Concurrency scenarios grounded against the real runtime but not yet
-/// automated (deterministic harness would be flaky). Recorded honestly so the
-/// gaps are visible, not hidden (Canvas §1.2, §5.9/§5.10).
+/// Residual concurrency edges documented honestly (not hidden, Canvas §1.2).
+/// 5.9 and 5.10 are now AUTOMATED (singleflight-dedup + resource-locks
+/// scenarios); these are the narrow remaining edges.
 pub const CONCURRENCY_GAPS: &[(&str, &str)] = &[
     (
-        "5.9 multi-agent-dedup",
-        "Singleflight dedup WORKS (one leader runs, follower joins and reuses), but the leader is not positively role-labeled 'leader' and the losing/contending process can emit non-JSON ('verification is already running'). Grounded; needs a two-concurrent-verify harness to automate without flakiness.",
+        "5.9 edge",
+        "Two TRULY simultaneous same-diff verifies (no head start) can race: if the follower cannot read the leader's evidence before the singleflight timeout it bails with a non-JSON error. The automated scenario drives a 100ms head start so the join is deterministic; the zero-gap race is a narrow robustness edge.",
     ),
     (
-        "5.10 resource-conflict",
-        "The .next exclusive lock + source-tree shared lock + queue serialization WORK, but a prisma-generate-only plan did not emit the expected prisma-client exclusive lock in this fixture. Grounded; needs a concurrent-conflicting-verify harness to automate.",
+        "5.10 edge",
+        "The .next exclusive + source-tree shared locks are asserted on a build plan, and vrt-core separately tests that an exclusive lock is waited on under the broker. A prisma-generate-only plan emitting a prisma-client exclusive lock was NOT covered here (needs a fixture where a prisma generate capability is detected).",
     ),
 ];

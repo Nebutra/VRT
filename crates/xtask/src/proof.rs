@@ -265,7 +265,101 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
     Ok((outcome, false_confidence, transcripts))
 }
 
-pub fn run_all(vrt_bin: &Path, scenarios: &[Scenario], commit: String) -> Result<ProofRun> {
+/// §5.9 — Multi-agent duplicate verification. Two concurrent same-diff brokered
+/// verifies must dedupe: exactly one leader runs, the other joins as follower,
+/// reuses (does not rerun) and is not reported failed. Driven with a head start
+/// so the singleflight join is deterministic, not flaky.
+fn singleflight_outcome(vrt_bin: &Path, xtask_dir: &Path) -> Result<ScenarioOutcome> {
+    let fixture = xtask_dir.join("fixtures/ts-lib");
+    let room = runner::prepare(
+        &fixture,
+        &[runner::Mutation {
+            path: "src/label.ts".into(),
+            contents: "export const PRICING_LABEL = \"singleflight probe\";\n".into(),
+        }],
+    )?;
+    runner::run_init(vrt_bin, room.path())?;
+    let (a, b) = runner::run_two_concurrent_verify(vrt_bin, room.path(), "dev", 100)?;
+
+    let role = |v: &Value| {
+        v.pointer("/evidence/singleflight/role")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let (ra, rb) = (role(&a), role(&b));
+    let one_each =
+        (ra == "leader" && rb == "follower") || (ra == "follower" && rb == "leader");
+    let follower = if ra == "follower" { &a } else { &b };
+    let follower_status = follower.get("status").and_then(Value::as_str).unwrap_or("");
+    let follower_reused = follower
+        .get("checks_reused")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let follower_run = follower.get("checks_run").and_then(Value::as_u64).unwrap_or(99);
+    let both_json = a.get("evidence_id").is_some() && b.get("evidence_id").is_some();
+
+    let mk = |name: &str, passed: bool, detail: String| AssertionResult {
+        name: name.to_string(),
+        passed,
+        blocking: true,
+        detail,
+    };
+    let assertions = vec![
+        mk("one_leader_one_follower", one_each, format!("roles: a={ra} b={rb}")),
+        mk(
+            "follower_not_reported_failed",
+            follower_status != "failed" && !follower_status.is_empty(),
+            format!("follower status = {follower_status}"),
+        ),
+        mk(
+            "follower_reuses_not_reruns",
+            follower_reused > 0 || follower_run == 0,
+            format!("follower checks_reused={follower_reused} checks_run={follower_run}"),
+        ),
+        mk(
+            "both_concurrent_processes_emit_json",
+            both_json,
+            "both verifies returned parseable agent reports".into(),
+        ),
+    ];
+    let verdict = if assertions.iter().any(|a| !a.passed) {
+        ScenarioVerdict::Fail
+    } else {
+        ScenarioVerdict::Pass
+    };
+
+    Ok(ScenarioOutcome {
+        id: "singleflight-dedup".into(),
+        title: "Concurrent same-diff verifies dedupe (singleflight)".into(),
+        proposition: Proposition::Governance,
+        fixture: "ts-lib".into(),
+        baseline_total_ms: 0,
+        vrt_total_ms: 0,
+        measured_saved_time_ms: 0,
+        estimated_saved_time_ms: 0,
+        commands_run: 0,
+        commands_avoided: 0,
+        full_builds_avoided: 0,
+        ci_failures_shifted_left: 0,
+        confidence: Confidence::default(),
+        residual_risks: vec![],
+        baseline_commands: vec![],
+        assertions,
+        hard_failures: vec![],
+        verdict,
+        notes: vec![format!(
+            "concurrency proven via two brokered verifies with a 100ms head start; leader role='{ra}', follower role='{rb}'"
+        )],
+    })
+}
+
+pub fn run_all(
+    vrt_bin: &Path,
+    scenarios: &[Scenario],
+    xtask_dir: &Path,
+    commit: String,
+) -> Result<ProofRun> {
     let mut outcomes = vec![];
     let mut false_confidence = vec![];
     let mut transcripts = vec![];
@@ -275,6 +369,8 @@ pub fn run_all(vrt_bin: &Path, scenarios: &[Scenario], commit: String) -> Result
         false_confidence.extend(fc);
         transcripts.push(pair);
     }
+    // Concurrency scenario (its own execution path: two concurrent verifies).
+    outcomes.push(singleflight_outcome(vrt_bin, xtask_dir)?);
     let agent_metrics = agent::aggregate(&transcripts);
 
     let count_code = |code: &str| {

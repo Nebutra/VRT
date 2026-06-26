@@ -6,7 +6,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
@@ -254,6 +255,43 @@ pub fn run_explain(vrt_bin: &Path, dir: &Path) -> Result<Value> {
         .context("vrt explain")?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     Ok(serde_json::from_str(stdout.trim()).unwrap_or(Value::Null))
+}
+
+fn verify_broker_capture(vrt_bin: &Path, dir: &Path, mode: &str) -> Result<Value> {
+    let out = Command::new(vrt_bin)
+        .args(["verify", "--mode", mode, "--broker", "--json"])
+        .current_dir(dir)
+        .output()
+        .context("vrt verify --broker")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(stdout.trim()).with_context(|| {
+        format!(
+            "parse concurrent verify json (stderr: {})",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
+}
+
+/// Run two concurrent `vrt verify --broker --json` against ONE clean room with
+/// the SAME diff. The first gets a head start so the singleflight join is
+/// deterministic (the second arrives while the leader holds the run lock).
+/// Returns (leader_candidate, second). Both must emit parseable JSON.
+pub fn run_two_concurrent_verify(
+    vrt_bin: &Path,
+    dir: &Path,
+    mode: &str,
+    head_start_ms: u64,
+) -> Result<(Value, Value)> {
+    let bin = vrt_bin.to_path_buf();
+    let d = dir.to_path_buf();
+    let m = mode.to_string();
+    let first = thread::spawn(move || verify_broker_capture(&bin, &d, &m));
+    thread::sleep(Duration::from_millis(head_start_ms));
+    let second = verify_broker_capture(vrt_bin, dir, mode);
+    let first = first
+        .join()
+        .map_err(|_| anyhow!("first verify thread panicked"))?;
+    Ok((first?, second?))
 }
 
 /// Locate (building if needed) the debug `vrt` binary for this workspace.
