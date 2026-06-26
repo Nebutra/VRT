@@ -1926,7 +1926,9 @@ fn brokered_verification_records_job_id_and_job_state() {
         job["queue_wait_ms"].as_u64().unwrap() as u128,
         evidence.queue_wait_ms
     );
-    assert_eq!(evidence.singleflight.role, "none");
+    // A brokered run holds the singleflight lock and is positively labeled the
+    // leader, so concurrent same-diff agents can tell leader from follower.
+    assert_eq!(evidence.singleflight.role, "leader");
 }
 
 #[test]

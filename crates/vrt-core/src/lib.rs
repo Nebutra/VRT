@@ -252,6 +252,13 @@ pub struct EvidenceRecord {
     pub report_path: String,
     pub validity: String,
     pub stale_reasons: Vec<String>,
+    /// Explicit, agent-readable escalation signal for the change under test.
+    #[serde(default)]
+    pub risk_tags: std::collections::BTreeSet<RiskTag>,
+    #[serde(default)]
+    pub requires_escalation: bool,
+    #[serde(default)]
+    pub escalations: Vec<EscalationRequirement>,
     #[serde(default)]
     pub broker_job_id: Option<String>,
     #[serde(default)]
@@ -1088,6 +1095,7 @@ pub fn run_verification_brokered(
                 broker_job_id: Some(job_id.clone()),
                 queue_wait_ms,
                 lock_wait_ms,
+                singleflight_role: "leader".to_string(),
             },
             ..VerificationRunOptions::default()
         },
@@ -1198,6 +1206,9 @@ struct RunContext {
     broker_job_id: Option<String>,
     queue_wait_ms: u128,
     lock_wait_ms: u128,
+    /// "leader" when this run holds the singleflight lock under the broker (so
+    /// concurrent same-diff agents can join it); "" for solo runs.
+    singleflight_role: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1308,6 +1319,17 @@ fn run_verification_internal(
         .join("evidence")
         .join(&evidence_id)
         .join("evidence.json");
+    // Positively label the singleflight leader so concurrent agents can tell
+    // leader from follower (the follower carries role "follower").
+    let singleflight = if run_context.singleflight_role == "leader" {
+        SingleflightEvidence {
+            role: "leader".to_string(),
+            key: Some(singleflight_key(root, profile, change, plan)?),
+            shared_from_evidence_id: None,
+        }
+    } else {
+        SingleflightEvidence::default()
+    };
     let evidence = EvidenceRecord {
         schema_version: VRT_SCHEMA_VERSION,
         evidence_id,
@@ -1335,10 +1357,13 @@ fn run_verification_internal(
         report_path: report_path.to_string_lossy().to_string(),
         validity,
         stale_reasons,
+        risk_tags: change.risk_tags.clone(),
+        requires_escalation: change.requires_escalation,
+        escalations: plan.escalations.clone(),
         broker_job_id: run_context.broker_job_id,
         queue_wait_ms: run_context.queue_wait_ms,
         lock_wait_ms: run_context.lock_wait_ms,
-        singleflight: SingleflightEvidence::default(),
+        singleflight,
         resource_locks: resource_locks_for_plan_with_wait(plan, run_context.lock_wait_ms),
         runner_pool: runner_pool_for_plan(plan),
     };
@@ -1427,6 +1452,9 @@ fn write_cached_evidence_hit(
         report_path: report_path.to_string_lossy().to_string(),
         validity: "valid".to_string(),
         stale_reasons: vec![],
+        risk_tags: change.risk_tags.clone(),
+        requires_escalation: change.requires_escalation,
+        escalations: plan.escalations.clone(),
         broker_job_id: run_context.broker_job_id.clone(),
         queue_wait_ms: run_context.queue_wait_ms,
         lock_wait_ms: run_context.lock_wait_ms,
@@ -1497,6 +1525,9 @@ fn write_singleflight_follower_evidence(
         report_path: report_path.to_string_lossy().to_string(),
         validity: leader.validity.clone(),
         stale_reasons: vec![],
+        risk_tags: change.risk_tags.clone(),
+        requires_escalation: change.requires_escalation,
+        escalations: plan.escalations.clone(),
         broker_job_id: run_context.broker_job_id.clone(),
         queue_wait_ms: run_context.queue_wait_ms,
         lock_wait_ms: run_context.lock_wait_ms,
@@ -2017,6 +2048,9 @@ pub fn render_agent_report(root: &Path, evidence: &EvidenceRecord) -> serde_json
         "raw_log": explanation.raw_log,
         "confidence": evidence.confidence,
         "residual_risks": evidence.confidence.residual_risks,
+        "requires_escalation": evidence.requires_escalation,
+        "escalations": evidence.escalations,
+        "risk_tags": evidence.risk_tags,
         "evidence": evidence,
     })
 }

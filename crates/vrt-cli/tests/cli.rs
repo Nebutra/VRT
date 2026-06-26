@@ -146,7 +146,8 @@ fn verify_broker_json_records_broker_job_evidence() {
         .as_str()
         .expect("broker job id");
     assert!(broker_job_id.starts_with("job_"));
-    assert_eq!(value["evidence"]["singleflight"]["role"], "none");
+    // Brokered run is the positively-labeled singleflight leader.
+    assert_eq!(value["evidence"]["singleflight"]["role"], "leader");
     assert!(dir
         .path()
         .join(".vrt/broker/jobs")
