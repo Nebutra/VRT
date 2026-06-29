@@ -8,11 +8,17 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::model::{ScenarioVerdict, ProofMetrics};
+use crate::model::{ProofMetrics, ScenarioVerdict};
 use crate::proof::ProofRun;
 
 pub fn emit(out_dir: &Path, run: &ProofRun) -> Result<()> {
-    for sub in ["baseline", "vrt", "reports", "failures", "agent-transcripts"] {
+    for sub in [
+        "baseline",
+        "vrt",
+        "reports",
+        "failures",
+        "agent-transcripts",
+    ] {
         fs::create_dir_all(out_dir.join(sub))?;
     }
 
@@ -28,7 +34,9 @@ pub fn emit(out_dir: &Path, run: &ProofRun) -> Result<()> {
             serde_json::to_string_pretty(outcome)?,
         )?;
         fs::write(
-            out_dir.join("baseline").join(format!("{}.json", outcome.id)),
+            out_dir
+                .join("baseline")
+                .join(format!("{}.json", outcome.id)),
             serde_json::to_string_pretty(&outcome.baseline_commands)?,
         )?;
         fs::write(
@@ -47,7 +55,9 @@ pub fn emit(out_dir: &Path, run: &ProofRun) -> Result<()> {
         )?;
         if outcome.verdict == ScenarioVerdict::Fail {
             fs::write(
-                out_dir.join("failures").join(format!("{}.json", outcome.id)),
+                out_dir
+                    .join("failures")
+                    .join(format!("{}.json", outcome.id)),
                 serde_json::to_string_pretty(&json!({
                     "scenario": outcome.id,
                     "title": outcome.title,
@@ -203,7 +213,10 @@ fn summary_md(run: &ProofRun) -> String {
                 pct(o.measured_saved_time_ms, o.baseline_total_ms)
             ));
         } else {
-            s.push_str(&format!("- Measured: vrt {}ms; baseline not fully measured (see notes)\n", o.vrt_total_ms));
+            s.push_str(&format!(
+                "- Measured: vrt {}ms; baseline not fully measured (see notes)\n",
+                o.vrt_total_ms
+            ));
         }
         s.push_str(&format!(
             "- commands_run={} commands_avoided={} full_builds_avoided={} ci_shifted_left={}\n",

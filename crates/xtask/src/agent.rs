@@ -155,7 +155,12 @@ pub fn vrt_transcript(scenario: &str, report: &Value, explain: &Value) -> AgentT
     let residual: Vec<String> = report
         .get("residual_risks")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
     let residual_risks_received = residual.len() as u64;
     // Preserve every residual risk received into the final report.

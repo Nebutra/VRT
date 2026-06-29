@@ -60,7 +60,10 @@ fn ok(name: &str, passed: bool, detail: impl Into<String>) -> AssertionResult {
 }
 
 /// An advisory assertion: encodes a quality/observability expectation. Its
-/// failure is a recorded gap, not a governance break.
+/// failure is a recorded gap, not a governance break. Part of the assertion
+/// tier API (the model + report + verdict honour `blocking == false`); kept
+/// available for scenarios that probe quality/DX expectations VRT may not meet.
+#[allow(dead_code)]
 fn advisory(name: &str, passed: bool, detail: impl Into<String>) -> AssertionResult {
     AssertionResult {
         name: name.to_string(),
@@ -134,7 +137,10 @@ fn naive_baseline() -> Vec<(String, String)> {
 }
 
 fn str_at(v: &Value, ptr: &str) -> String {
-    v.pointer(ptr).and_then(Value::as_str).unwrap_or("").to_string()
+    v.pointer(ptr)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn u64_at(v: &Value, key: &str) -> u64 {
@@ -145,19 +151,32 @@ fn stale_reasons(report: &Value) -> Vec<String> {
     report
         .pointer("/evidence/stale_reasons")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn reused_count(report: &Value) -> u64 {
-    report.get("checks_reused").and_then(Value::as_u64).unwrap_or(u64::MAX)
+    report
+        .get("checks_reused")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::MAX)
 }
 
 fn changed_files(report: &Value) -> Vec<String> {
     report
         .pointer("/evidence/dirty_state/changed_files")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -266,7 +285,7 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
                 let build_skipped = skipped.iter().any(|c| c.contains("build"));
                 let release = release_conf(e.report);
                 let residuals = residual_risks(e.report);
-                let mut out = vec![
+                let out = vec![
                     ok(
                         "full_build_skipped",
                         build_skipped,
@@ -312,11 +331,7 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
             config_mutated: false,
             second_stage: None,
             assertions: Box::new(|e| {
-                let status = e
-                    .report
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let status = e.report.get("status").and_then(Value::as_str).unwrap_or("");
                 let failed_locally = status == "failed"
                     || e.report
                         .get("evidence")
@@ -404,7 +419,9 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
                     ok(
                         "escalation_downgraded_local",
                         local != "high",
-                        format!("local confidence = {local} (escalation should downgrade from high)"),
+                        format!(
+                            "local confidence = {local} (escalation should downgrade from high)"
+                        ),
                     ),
                 ]
             }),
@@ -436,25 +453,45 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
                 let rc_first = rc.first().and_then(Value::as_str).unwrap_or("").to_string();
                 let files = changed_files(e.report);
                 vec![
-                    ok("status_failed", str_at(e.report, "/status") == "failed",
-                       format!("status = {}", str_at(e.report, "/status"))),
-                    ok("failure_kind_type_error",
-                       str_at(e.report, "/failure_kind") == "type_error",
-                       format!("failure_kind = {}", str_at(e.report, "/failure_kind"))),
-                    ok("single_check_run", u64_at(e.report, "checks_run") == 1,
-                       format!("checks_run = {}", u64_at(e.report, "checks_run"))),
-                    ok("downstream_noise_hidden",
-                       u64_at(e.report, "downstream_noise_hidden") != u64::MAX
-                           && u64_at(e.report, "downstream_noise_hidden") > 0,
-                       format!("downstream_noise_hidden = {}", u64_at(e.report, "downstream_noise_hidden"))),
-                    ok("root_cause_first", !rc.is_empty(),
-                       format!("first root cause: {rc_first}")),
-                    ok("do_not_run_includes_build",
-                       do_not_run_cmds(e.report).to_lowercase().contains("build"),
-                       format!("do_not_run: {}", do_not_run_cmds(e.report))),
-                    ok("scoped_to_root_change",
-                       files.iter().any(|f| f.contains("types.ts")),
-                       format!("changed_files: {files:?}")),
+                    ok(
+                        "status_failed",
+                        str_at(e.report, "/status") == "failed",
+                        format!("status = {}", str_at(e.report, "/status")),
+                    ),
+                    ok(
+                        "failure_kind_type_error",
+                        str_at(e.report, "/failure_kind") == "type_error",
+                        format!("failure_kind = {}", str_at(e.report, "/failure_kind")),
+                    ),
+                    ok(
+                        "single_check_run",
+                        u64_at(e.report, "checks_run") == 1,
+                        format!("checks_run = {}", u64_at(e.report, "checks_run")),
+                    ),
+                    ok(
+                        "downstream_noise_hidden",
+                        u64_at(e.report, "downstream_noise_hidden") != u64::MAX
+                            && u64_at(e.report, "downstream_noise_hidden") > 0,
+                        format!(
+                            "downstream_noise_hidden = {}",
+                            u64_at(e.report, "downstream_noise_hidden")
+                        ),
+                    ),
+                    ok(
+                        "root_cause_first",
+                        !rc.is_empty(),
+                        format!("first root cause: {rc_first}"),
+                    ),
+                    ok(
+                        "do_not_run_includes_build",
+                        do_not_run_cmds(e.report).to_lowercase().contains("build"),
+                        format!("do_not_run: {}", do_not_run_cmds(e.report)),
+                    ),
+                    ok(
+                        "scoped_to_root_change",
+                        files.iter().any(|f| f.contains("types.ts")),
+                        format!("changed_files: {files:?}"),
+                    ),
                 ]
             }),
         },
@@ -516,25 +553,46 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
                 let weak = doctor_weak_spot_ids(e.doctor);
                 let caps = doctor_capability_blob(e.doctor);
                 vec![
-                    ok("doctor_no_typecheck_weak_spot",
-                       weak.iter().any(|w| w == "no-typecheck-script"),
-                       format!("weak_spots: {weak:?}")),
-                    ok("doctor_no_test_weak_spot",
-                       weak.iter().any(|w| w == "no-test-script"),
-                       format!("weak_spots: {weak:?}")),
-                    ok("no_typecheck_capability_fabricated", !caps.contains("typecheck"),
-                       format!("capabilities: {caps}")),
-                    ok("no_test_capability_fabricated", !caps.contains("test"),
-                       format!("capabilities: {caps}")),
-                    ok("zero_behavioral_check_run", u64_at(e.report, "checks_run") == 0,
-                       format!("checks_run = {}", u64_at(e.report, "checks_run"))),
-                    ok("local_confidence_not_high", local_conf(e.report) != "high",
-                       format!("local = {}", local_conf(e.report))),
-                    ok("release_insufficient", release_conf(e.report) == "insufficient",
-                       format!("release = {}", release_conf(e.report))),
-                    ok("zero_check_flagged_invalid",
-                       str_at(e.report, "/validity") == "invalid",
-                       format!("validity = {}", str_at(e.report, "/validity"))),
+                    ok(
+                        "doctor_no_typecheck_weak_spot",
+                        weak.iter().any(|w| w == "no-typecheck-script"),
+                        format!("weak_spots: {weak:?}"),
+                    ),
+                    ok(
+                        "doctor_no_test_weak_spot",
+                        weak.iter().any(|w| w == "no-test-script"),
+                        format!("weak_spots: {weak:?}"),
+                    ),
+                    ok(
+                        "no_typecheck_capability_fabricated",
+                        !caps.contains("typecheck"),
+                        format!("capabilities: {caps}"),
+                    ),
+                    ok(
+                        "no_test_capability_fabricated",
+                        !caps.contains("test"),
+                        format!("capabilities: {caps}"),
+                    ),
+                    ok(
+                        "zero_behavioral_check_run",
+                        u64_at(e.report, "checks_run") == 0,
+                        format!("checks_run = {}", u64_at(e.report, "checks_run")),
+                    ),
+                    ok(
+                        "local_confidence_not_high",
+                        local_conf(e.report) != "high",
+                        format!("local = {}", local_conf(e.report)),
+                    ),
+                    ok(
+                        "release_insufficient",
+                        release_conf(e.report) == "insufficient",
+                        format!("release = {}", release_conf(e.report)),
+                    ),
+                    ok(
+                        "zero_check_flagged_invalid",
+                        str_at(e.report, "/validity") == "invalid",
+                        format!("validity = {}", str_at(e.report, "/validity")),
+                    ),
                 ]
             }),
         },
@@ -560,20 +618,35 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
             config_mutated: true,
             second_stage: Some(SecondStage {
                 mutations: vec![
-                    Mutation { path: "tsconfig.build.json".into(), contents: TSBUILD_FIXED.into() },
-                    Mutation { path: "tsconfig.json".into(), contents: TSCONFIG_CHANGED.into() },
+                    Mutation {
+                        path: "tsconfig.build.json".into(),
+                        contents: TSBUILD_FIXED.into(),
+                    },
+                    Mutation {
+                        path: "tsconfig.json".into(),
+                        contents: TSCONFIG_CHANGED.into(),
+                    },
                 ],
                 use_continue: true,
             }),
             assertions: Box::new(|e| {
                 let stale = stale_reasons(e.report);
                 vec![
-                    ok("prior_checks_not_reused", reused_count(e.report) == 0,
-                       format!("checks_reused = {}", reused_count(e.report))),
-                    ok("stale_reasons_recorded", !stale.is_empty(),
-                       format!("stale_reasons: {stale:?}")),
-                    ok("release_stays_insufficient", release_conf(e.report) == "insufficient",
-                       format!("release = {}", release_conf(e.report))),
+                    ok(
+                        "prior_checks_not_reused",
+                        reused_count(e.report) == 0,
+                        format!("checks_reused = {}", reused_count(e.report)),
+                    ),
+                    ok(
+                        "stale_reasons_recorded",
+                        !stale.is_empty(),
+                        format!("stale_reasons: {stale:?}"),
+                    ),
+                    ok(
+                        "release_stays_insufficient",
+                        release_conf(e.report) == "insufficient",
+                        format!("release = {}", release_conf(e.report)),
+                    ),
                 ]
             }),
         },
@@ -594,14 +667,23 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
             vrt_mode: "release".into(),
             high_risk: false,
             config_mutated: false,
-            second_stage: Some(SecondStage { mutations: vec![], use_continue: true }),
+            second_stage: Some(SecondStage {
+                mutations: vec![],
+                use_continue: true,
+            }),
             assertions: Box::new(|e| {
                 let stale = stale_reasons(e.report);
                 vec![
-                    ok("checks_are_reused", reused_count(e.report) >= 1,
-                       format!("checks_reused = {}", reused_count(e.report))),
-                    ok("no_stale_reasons", stale.is_empty(),
-                       format!("stale_reasons: {stale:?}")),
+                    ok(
+                        "checks_are_reused",
+                        reused_count(e.report) >= 1,
+                        format!("checks_reused = {}", reused_count(e.report)),
+                    ),
+                    ok(
+                        "no_stale_reasons",
+                        stale.is_empty(),
+                        format!("stale_reasons: {stale:?}"),
+                    ),
                 ]
             }),
         },
@@ -627,12 +709,16 @@ pub fn all_scenarios(xtask_dir: &Path, workspace_root: &Path) -> Vec<Scenario> {
             assertions: Box::new(|e| {
                 let locks = resource_locks(e.report);
                 vec![
-                    ok("dot_next_exclusive_lock",
-                       locks.iter().any(|l| l == ".next:exclusive"),
-                       format!("resource_locks: {locks:?}")),
-                    ok("source_tree_shared_lock",
-                       locks.iter().any(|l| l == "source-tree:shared"),
-                       format!("resource_locks: {locks:?}")),
+                    ok(
+                        "dot_next_exclusive_lock",
+                        locks.iter().any(|l| l == ".next:exclusive"),
+                        format!("resource_locks: {locks:?}"),
+                    ),
+                    ok(
+                        "source_tree_shared_lock",
+                        locks.iter().any(|l| l == "source-tree:shared"),
+                        format!("resource_locks: {locks:?}"),
+                    ),
                 ]
             }),
         },

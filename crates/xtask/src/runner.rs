@@ -57,7 +57,12 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
 
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
-        .args(["-c", "user.email=proof@vrt.local", "-c", "user.name=vrt-proof"])
+        .args([
+            "-c",
+            "user.email=proof@vrt.local",
+            "-c",
+            "user.name=vrt-proof",
+        ])
         .args(args)
         .current_dir(dir)
         .output()

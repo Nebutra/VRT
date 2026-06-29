@@ -103,8 +103,7 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
     // Baseline clean room.
     let baseline_room: CleanRoom = runner::prepare(&scenario.fixture, &scenario.mutations)?;
     let baseline = runner::run_baseline(baseline_room.path(), &scenario.baseline);
-    let baseline_fully_measured =
-        !baseline.is_empty() && baseline.iter().all(|r| r.measured);
+    let baseline_fully_measured = !baseline.is_empty() && baseline.iter().all(|r| r.measured);
     let baseline_total_ms: u128 = baseline
         .iter()
         .filter(|r| r.measured)
@@ -122,8 +121,12 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
     // is what the assertions evaluate (e.g. stale-evidence scenarios).
     if let Some(stage) = &scenario.second_stage {
         runner::apply_mutations(vrt_room.path(), &stage.mutations)?;
-        let (report2, dur2) =
-            runner::run_verify(vrt_bin, vrt_room.path(), &scenario.vrt_mode, stage.use_continue)?;
+        let (report2, dur2) = runner::run_verify(
+            vrt_bin,
+            vrt_room.path(),
+            &scenario.vrt_mode,
+            stage.use_continue,
+        )?;
         report = report2;
         vrt_total_ms = dur2;
     }
@@ -158,9 +161,7 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
                 .collect()
         })
         .unwrap_or_default();
-    let baseline_had_build = baseline
-        .iter()
-        .any(|r| r.label == "build" && r.measured);
+    let baseline_had_build = baseline.iter().any(|r| r.label == "build" && r.measured);
     let full_builds_avoided =
         u64::from(baseline_had_build && skipped_caps.iter().any(|c| c.contains("build")));
     let ci_failures_shifted_left = u64::from(status == "failed");
@@ -193,8 +194,7 @@ fn evaluate(vrt_bin: &Path, scenario: &Scenario) -> Result<EvalResult> {
             .to_string(),
     };
 
-    let hard_failures =
-        detectors::scan_all(&report, scenario.config_mutated, scenario.high_risk);
+    let hard_failures = detectors::scan_all(&report, scenario.config_mutated, scenario.high_risk);
 
     let assertions = (scenario.assertions)(&Evaluated {
         report: &report,
@@ -288,15 +288,17 @@ fn singleflight_outcome(vrt_bin: &Path, xtask_dir: &Path) -> Result<ScenarioOutc
             .to_string()
     };
     let (ra, rb) = (role(&a), role(&b));
-    let one_each =
-        (ra == "leader" && rb == "follower") || (ra == "follower" && rb == "leader");
+    let one_each = (ra == "leader" && rb == "follower") || (ra == "follower" && rb == "leader");
     let follower = if ra == "follower" { &a } else { &b };
     let follower_status = follower.get("status").and_then(Value::as_str).unwrap_or("");
     let follower_reused = follower
         .get("checks_reused")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let follower_run = follower.get("checks_run").and_then(Value::as_u64).unwrap_or(99);
+    let follower_run = follower
+        .get("checks_run")
+        .and_then(Value::as_u64)
+        .unwrap_or(99);
     let both_json = a.get("evidence_id").is_some() && b.get("evidence_id").is_some();
 
     let mk = |name: &str, passed: bool, detail: String| AssertionResult {
@@ -306,7 +308,11 @@ fn singleflight_outcome(vrt_bin: &Path, xtask_dir: &Path) -> Result<ScenarioOutc
         detail,
     };
     let assertions = vec![
-        mk("one_leader_one_follower", one_each, format!("roles: a={ra} b={rb}")),
+        mk(
+            "one_leader_one_follower",
+            one_each,
+            format!("roles: a={ra} b={rb}"),
+        ),
         mk(
             "follower_not_reported_failed",
             follower_status != "failed" && !follower_status.is_empty(),
@@ -396,7 +402,10 @@ pub fn run_all(
         .iter()
         .filter(|o| o.verdict == ScenarioVerdict::Fail)
         .count() as u64;
-    let advisory_gaps: u64 = outcomes.iter().map(|o| o.advisory_gaps().len() as u64).sum();
+    let advisory_gaps: u64 = outcomes
+        .iter()
+        .map(|o| o.advisory_gaps().len() as u64)
+        .sum();
     let scenarios_not_applicable = outcomes
         .iter()
         .filter(|o| o.verdict == ScenarioVerdict::NotApplicable)

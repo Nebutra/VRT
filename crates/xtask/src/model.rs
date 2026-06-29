@@ -134,7 +134,10 @@ pub struct ScenarioOutcome {
 impl ScenarioOutcome {
     /// All blocking (governance-critical) assertions passed.
     pub fn blocking_passed(&self) -> bool {
-        self.assertions.iter().filter(|a| a.blocking).all(|a| a.passed)
+        self.assertions
+            .iter()
+            .filter(|a| a.blocking)
+            .all(|a| a.passed)
     }
 
     /// Advisory assertions that failed — recorded gaps, not governance breaks.

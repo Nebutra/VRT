@@ -7,7 +7,10 @@ use clap::{Parser, Subcommand};
 use xtask::{proof, report, runner, scenarios};
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "VRT workspace tasks (adversarial proof harness)")]
+#[command(
+    name = "xtask",
+    about = "VRT workspace tasks (adversarial proof harness)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,
@@ -62,7 +65,11 @@ fn run_proof(out: PathBuf) -> Result<()> {
     eprintln!("running {} adversarial scenarios…", scenarios.len());
     let run = proof::run_all(&vrt_bin, &scenarios, &xtask_dir, commit)?;
 
-    let out_dir = if out.is_absolute() { out } else { root.join(out) };
+    let out_dir = if out.is_absolute() {
+        out
+    } else {
+        root.join(out)
+    };
     report::emit(&out_dir, &run).context("emit proof package")?;
 
     println!("{}", report::console_verdict(&run, &run.metrics));
