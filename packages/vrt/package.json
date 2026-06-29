@@ -1,11 +1,14 @@
 {
-  "name": "vrt",
+  "name": "@nebutra/vrt",
   "version": "0.1.0",
   "description": "Agent-native local verification runtime CLI for fast, auditable code checks.",
   "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nebutra/vrt.git"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "bin": {
     "vrt": "./bin/vrt.js"

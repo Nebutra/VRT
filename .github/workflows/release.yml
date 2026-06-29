@@ -64,8 +64,8 @@ jobs:
         with:
           node-version: "22"
       - uses: dtolnay/rust-toolchain@stable
-      - run: npm --workspace vrt run build:binary
-      - run: npm --workspace vrt run stage:binary -- --platform=${{ matrix.node_platform }} --arch=${{ matrix.node_arch }}
+      - run: npm --workspace @nebutra/vrt run build:binary
+      - run: npm --workspace @nebutra/vrt run stage:binary -- --platform=${{ matrix.node_platform }} --arch=${{ matrix.node_arch }}
       - name: Verify staged binary layout
         shell: bash
         run: |
@@ -105,11 +105,11 @@ jobs:
           test -x packages/vrt/bin/linux-x64/vrt
           test -x packages/vrt/bin/darwin-arm64/vrt
           test -f packages/vrt/bin/win32-x64/vrt.exe
-      - run: npm pack --workspace vrt
+      - run: npm pack --workspace @nebutra/vrt
       - uses: actions/upload-artifact@v4
         with:
           name: vrt-npm-package
-          path: vrt-*.tgz
+          path: nebutra-vrt-*.tgz
 
   publish:
     name: Publish npm package
@@ -128,7 +128,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: vrt-npm-package
-      - run: npm publish vrt-*.tgz --provenance --access public
+      - run: npm publish nebutra-vrt-*.tgz --provenance --access public
 
   homebrew:
     name: Bump Homebrew formula

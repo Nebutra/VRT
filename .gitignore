@@ -11,3 +11,7 @@ node_modules/
 
 # Generated adversarial proof package (regenerate with `pnpm proof`)
 .vrt-proof/
+
+# Staged per-platform CLI binaries (built by CI, not committed)
+packages/vrt/bin/*/
+*.tgz

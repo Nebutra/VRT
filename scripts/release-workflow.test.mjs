@@ -13,8 +13,8 @@ test("release workflow builds, aggregates, and packs platform npm binaries", asy
   assert.match(workflow, /cargo clippy --workspace --all-targets -- -D warnings/);
   assert.match(workflow, /npm test/);
   assert.match(workflow, /npm run docs:check/);
-  assert.match(workflow, /npm --workspace vrt run build:binary/);
-  assert.match(workflow, /npm --workspace vrt run stage:binary -- --platform=\$\{\{ matrix\.node_platform \}\} --arch=\$\{\{ matrix\.node_arch \}\}/);
+  assert.match(workflow, /npm --workspace @nebutra\/vrt run build:binary/);
+  assert.match(workflow, /npm --workspace @nebutra\/vrt run stage:binary -- --platform=\$\{\{ matrix\.node_platform \}\} --arch=\$\{\{ matrix\.node_arch \}\}/);
   assert.match(workflow, /actions\/upload-artifact@/);
   assert.match(workflow, /packages\/vrt\/bin\/\$\{\{ matrix\.node_platform \}\}-\$\{\{ matrix\.node_arch \}\}/);
   assert.match(workflow, /\n  assemble:\n/);
@@ -27,7 +27,7 @@ test("release workflow builds, aggregates, and packs platform npm binaries", asy
   assert.match(workflow, /path:\s*packages\/vrt\/bin\/darwin-arm64/);
   assert.match(workflow, /name:\s*vrt-binary-win32-x64/);
   assert.match(workflow, /path:\s*packages\/vrt\/bin\/win32-x64/);
-  assert.match(workflow, /npm pack --workspace vrt/);
+  assert.match(workflow, /npm pack --workspace @nebutra\/vrt/);
   assert.match(workflow, /name:\s*vrt-npm-package/);
   assert.match(workflow, /publish_to_npm:/);
   assert.match(workflow, /\n  publish:\n/);
@@ -36,12 +36,12 @@ test("release workflow builds, aggregates, and packs platform npm binaries", asy
   assert.match(workflow, /id-token:\s*write/);
   assert.match(workflow, /actions\/download-artifact@/);
   assert.match(workflow, /name:\s*vrt-npm-package/);
-  assert.match(workflow, /npm publish vrt-\*\.tgz --provenance --access public/);
+  assert.match(workflow, /npm publish nebutra-vrt-\*\.tgz --provenance --access public/);
 
   const packageJob = workflow.split(/\n  assemble:\n/)[0];
   assert.doesNotMatch(
     packageJob,
-    /npm pack --workspace vrt/,
+    /npm pack --workspace @nebutra\/vrt/,
     "per-platform jobs must upload binaries, not same-name npm packages",
   );
 });
