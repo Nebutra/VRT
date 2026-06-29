@@ -35,12 +35,34 @@ export function rewriteFormula(text, { version, sha256 }) {
     .replace(shaRe, `sha256 "${sha256}"`);
 }
 
-async function fetchTarballSha256(version) {
-  const url = `https://github.com/Nebutra/VRT/archive/refs/tags/${version}.tar.gz`;
+async function sha256Of(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`fetch ${url} failed: ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
   return createHash("sha256").update(buf).digest("hex");
+}
+
+// GitHub's auto-generated source archive can return different bytes for a few
+// seconds after a tag is created/moved (cache propagation). Poll until the
+// checksum is STABLE (N identical reads in a row) so we never pin a transient
+// value that users' `brew install` would then fail to match.
+async function fetchTarballSha256(version, { stableReads = 3, attempts = 20, delayMs = 6000 } = {}) {
+  const url = `https://github.com/Nebutra/VRT/archive/refs/tags/${version}.tar.gz`;
+  let last = null;
+  let streak = 0;
+  for (let i = 0; i < attempts; i++) {
+    const sha = await sha256Of(url);
+    if (sha === last) {
+      streak += 1;
+      if (streak >= stableReads) return sha;
+    } else {
+      last = sha;
+      streak = 1;
+      if (stableReads <= 1) return sha;
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  throw new Error(`tarball sha256 for ${version} did not stabilize after ${attempts} reads`);
 }
 
 function arg(name) {

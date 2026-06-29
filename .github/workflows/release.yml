@@ -132,7 +132,8 @@ jobs:
 
   homebrew:
     name: Bump Homebrew formula
-    needs: publish
+    # Only needs the tag + a green quality gate; independent of npm publishing.
+    needs: quality
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
