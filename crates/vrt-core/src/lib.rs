@@ -3025,7 +3025,7 @@ pub fn list_worktree_sessions(root: &Path) -> Result<Vec<WorktreeSession>> {
             sessions.push(session);
         }
     }
-    sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    sessions.sort_by_key(|session| session.created_at);
     Ok(sessions)
 }
 
@@ -3119,7 +3119,7 @@ pub fn list_session_contexts(root: &Path) -> Result<Vec<SessionContext>> {
             sessions.push(session);
         }
     }
-    sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    sessions.sort_by_key(|session| session.created_at);
     Ok(sessions)
 }
 
