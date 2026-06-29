@@ -18,6 +18,7 @@
         "group": "Get started",
         "pages": [
           "docs/introduction",
+          "docs/install",
           "docs/quickstart",
           "docs/examples"
         ]

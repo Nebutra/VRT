@@ -14,8 +14,24 @@ The promise is not "skip tests." The promise is:
 - Report skipped checks as residual risk, never as passed.
 - Give agents JSON they can act on without reading thousands of log lines.
 
+Install with Homebrew (macOS / Linux):
+
+```bash
+brew tap nebutra/vrt https://github.com/Nebutra/VRT
+brew install vrt
+# before the first tagged release, install the latest main:
+# brew install --HEAD nebutra/vrt/vrt
+```
+
+Or build from source with Cargo:
+
 ```bash
 cargo install --path crates/vrt-cli
+```
+
+Then:
+
+```bash
 vrt init
 vrt verify --json
 ```

@@ -1,0 +1,68 @@
+---
+title: "Install"
+description: "Install the VRT CLI with Homebrew, Cargo, or npm."
+---
+
+VRT ships a single `vrt` binary. Pick whichever channel fits your environment.
+
+## Homebrew (macOS and Linux)
+
+This repository is its own Homebrew tap, so no separate tap repo is required.
+
+```bash
+brew tap nebutra/vrt https://github.com/Nebutra/VRT
+brew install vrt
+```
+
+Before the first tagged release exists, install the latest `main`:
+
+```bash
+brew install --HEAD nebutra/vrt/vrt
+```
+
+The formula builds from source, so it works uniformly on Apple Silicon, Intel
+macOS, and Linux. Homebrew installs the Rust toolchain as a build-only
+dependency and removes it afterward.
+
+Upgrade later with:
+
+```bash
+brew update
+brew upgrade vrt
+```
+
+<Note>
+The formula's pinned version and checksum are bumped automatically by the
+Release workflow on each `v*` tag (`scripts/bump-homebrew-formula.mjs`), so
+`brew upgrade` tracks tagged releases.
+</Note>
+
+## Cargo (build from source)
+
+```bash
+cargo install --path crates/vrt-cli
+# or, once published to crates.io:
+# cargo install vrt-cli
+```
+
+## npm (bundled prebuilt binary)
+
+The `vrt` npm package wraps the same binary for Node-based toolchains and CI:
+
+```bash
+npm install -g vrt
+# or run without installing:
+npx vrt --help
+```
+
+## Verify the install
+
+```bash
+vrt --version
+vrt init
+vrt verify --json
+```
+
+`vrt init` understands the current project and writes the `.vrt/` workspace;
+`vrt verify --json` plans and runs the smallest serious verification path and
+prints an agent-readable evidence report.
