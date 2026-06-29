@@ -15,7 +15,7 @@ class Vrt < Formula
   desc "Agent-native local verification runtime for fast, auditable code checks"
   homepage "https://github.com/Nebutra/VRT"
   url "https://github.com/Nebutra/VRT/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "a41be3cadea202391231cc2facddca8275ce1aad1a70d59c1929e68bd76b7f30"
   license "MIT"
   head "https://github.com/Nebutra/VRT.git", branch: "main"
 
